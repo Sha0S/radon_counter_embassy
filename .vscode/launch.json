@@ -1,0 +1,75 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "preLaunchTask": "cargo_build_debug",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs-debugger",
+            // "server": "127.0.0.1:50001", // For connecting to an existing probe-rs-debugger process
+            "chip": "STM32U073CCUx",
+            "cwd": "${workspaceFolder}",
+            "coreConfigs": [
+                {
+                    "programBinary": "target/thumbv6m-none-eabi/debug/radon_counter_embassy",
+                    "svdFile": "../STM32U073.svd",
+                    "coreIndex": 0,
+                    
+                    "rttEnabled": true,
+                    "rttChannelFormats": [
+                        {
+                            "dataFormat": "String",
+                            "channelNumber": 0,
+                            "showTimestamps": true
+                        }
+                    ],
+                },
+            ],
+            "runtimeExecutable": "probe-rs",
+            "runtimeArgs": ["dap-server"],
+            "flashingConfig": {
+              "flashingEnabled": true,
+              "haltAfterReset": false,
+            },
+            "connectUnderReset": false,
+            "consoleLogLevel": "Info" //Console, Info, Debug
+            //"speed": 24000, //!MODIFY (or remove)
+            //"probe": "VID:PID:<Serial>", //!MODIFY (or remove)
+        },
+        {
+            "preLaunchTask": "cargo_build_release",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs-release",
+            // "server": "127.0.0.1:50001", // For connecting to an existing probe-rs-debugger process
+            "chip": "STM32U073CCUx",
+            "cwd": "${workspaceFolder}",
+            "coreConfigs": [
+                {
+                    "programBinary": "target/thumbv6m-none-eabi/release/radon_counter_embassy",
+                    "svdFile": "../STM32U073.svd",
+                    "coreIndex": 0,
+                    
+                    "rttEnabled": true,
+                    "rttChannelFormats": [
+                        {
+                            "dataFormat": "String",
+                            "channelNumber": 0,
+                            "showTimestamps": true
+                        }
+                    ],
+                },
+            ],
+            "runtimeExecutable": "probe-rs",
+            "runtimeArgs": ["dap-server"],
+            "flashingConfig": {
+              "flashingEnabled": true,
+              "haltAfterReset": false,
+            },
+            "connectUnderReset": false,
+            "consoleLogLevel": "Info" //Info, Debug
+            //"speed": 24000, //!MODIFY (or remove)
+            //"probe": "VID:PID:<Serial>", //!MODIFY (or remove)
+        },
+    ]
+}

@@ -1,3 +1,0 @@
-- can't set clck to 1MHz (anything lower than 2MHz )
-- RTC alarm?
-- couldn't get the SD card working with SPI

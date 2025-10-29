@@ -502,12 +502,18 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
 
 
                 // a) we recive a page number
-                if n > 1 {
-                    info!("Requesting page #{} of EEPROM", data[1]);
-                    if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, data[1] as u16).await {
+                if n > 2 {
+                    let half_page_number = ((data[1] as u16 ) << 8 ) + data[2] as u16;
+                    info!("Requesting half-page #{} of EEPROM", half_page_number);
+                    if half_page_number < 1024 {
+                        if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, half_page_number).await {
                             class.write_packet(&page).await?;
-                    } else {
+                        } else {
                             class.write_packet(&[1]).await?;
+                        }
+                    } else {
+                        error!("Requested half-page number is outside of EEPROM capacity");
+                        class.write_packet(&[1]).await?;
                     }
                 } else {
                  // b) we don't, and have to read 1024 32 byte pages

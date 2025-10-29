@@ -10,7 +10,6 @@
             - button (PB3)  -> briefly display Soc on the status LEDs?
             - switch (PA15) -> enable/disable data acq, put device to standby
         - USB:
-            - sync RTC time with host machine
             - read EEPROM data
         - SD card
         - SSR control (PB2)
@@ -47,6 +46,7 @@ mod stc3315;
 mod mc_24cs256;
 
 type I2c1Bus = Mutex<NoopRawMutex, I2c<'static, Blocking, i2c::Master>>;
+type RtcShared = Mutex<NoopRawMutex, Rtc>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(false);
@@ -128,9 +128,11 @@ async fn main(spawner: Spawner) {
 
     let mut rtc  = Rtc::new(p.RTC, RtcConfig::default());
     let default_dt = DateTime::from(2025, 10, 25, DayOfWeek::Saturday, 12, 40, 00, 00).unwrap();
-
     rtc.set_datetime(default_dt).unwrap();
-    spawner.spawn(rtc_alarm(rtc, i2c_bus)).unwrap();
+    static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
+    let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
+
+    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus)).unwrap();
 
     /*
         STC3315 + Status LEDs
@@ -211,7 +213,7 @@ async fn main(spawner: Spawner) {
         loop {
             class.wait_connection().await;
             info!("Connected");
-            let _ = handle_usb_connection(&mut class, i2c_bus).await;
+            let _ = handle_usb_connection(&mut class, i2c_bus, rtc_shared).await;
             info!("Disconnected");
         }
     };
@@ -344,12 +346,12 @@ async fn comparator_1(mut pwm: SimplePwm<'static, peripherals::TIM2>) {
 // RTC "alarm", uses pooling as proper alarms are not supported (?) yet
 // Set to trigger every min while testing. Final product should trigger every hour
 #[embassy_executor::task]
-async fn rtc_alarm(rtc: Rtc, i2c_bus: &'static I2c1Bus)
+async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus)
 {
-    let mut old = rtc.now().unwrap();
+    let mut old = rtc.lock().await.now().unwrap();
     let mut now;
     loop {
-        now = rtc.now().unwrap();
+        now = rtc.lock().await.now().unwrap();
         if now.minute() != old.minute() { 
             old = now;
 
@@ -397,9 +399,11 @@ impl From<EndpointError> for Disconnected {
 }
 
 // Accepted commands:
-const USB_COMMAND_GET_PULSE_COUNTER: u8 =   0x08;   // returns the pulse_counter variable, u16, [MSB, LSB]
-const USB_COMMAND_GET_TEMP_AND_RH: u8 =     0x0C;   // returns the whole 6 bytes from SHT40 response, no conversion
-const USB_COMMAND_GET_BATTERY_SOC: u8 =     0x10;   // returns the battery SoC from STC3315
+const USB_COMMAND_GET_PULSE_COUNTER: u8 =   0x04;   // returns the pulse_counter variable, u16, [MSB, LSB]
+const USB_COMMAND_GET_TEMP_AND_RH: u8 =     0x08;   // returns the whole 6 bytes from SHT40 response, no conversion
+const USB_COMMAND_GET_BATTERY_SOC: u8 =     0x0C;   // returns the battery SoC from STC3315
+
+const USB_COMMAND_SET_RTC: u8 =             0x10;   // sets the RTC to the 
 
 const USB_COMMAND_EEPROM_CLEAR: u8 =        0x20;   // clear the contents of the EEPROM
 //const USB_COMMAND_EEPROM_READ: u8 =         0x24;   // read the contents of the EEPROM
@@ -408,7 +412,7 @@ const USB_COMMAND_HV_PSU_ON: u8 =           0x30;
 const USB_COMMAND_HV_PSU_OFF: u8 =          0x34;
 
 // The task handling the response to the incomming USB communication
-async fn handle_usb_connection<'d, T: usb::Instance + 'd>(class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>, i2c_bus: &'static I2c1Bus) -> Result<(), Disconnected> {
+async fn handle_usb_connection<'d, T: usb::Instance + 'd>(class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>, i2c_bus: &'static I2c1Bus, rtc: &'static RtcShared) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
         let n = class.read_packet(&mut buf).await?;
@@ -443,6 +447,16 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(class: &mut cdc_acm::C
                 } 
                 
             }
+            USB_COMMAND_SET_RTC => {
+                if n != 8 {
+                    class.write_packet(&[0]).await?;
+                    error!("Packet size incorrect for setting RTC");
+                } else if let Ok(dow) = day_of_week_from_u8(buf[4]) &&
+                    let Ok(new_time) = DateTime::from(  2000u16 + buf[1] as u16, buf[2],buf[3], dow, buf[5], buf[6], buf[7], 0 ) 
+                {
+                    rtc.lock().await.set_datetime(new_time);
+                }
+            }
             USB_COMMAND_EEPROM_CLEAR => {
                 match mc_24cs256::clear(&mut *i2c_bus.lock().await).await {
                     Ok(_) => {
@@ -469,4 +483,17 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(class: &mut cdc_acm::C
             }
         }
     }
+}
+
+fn day_of_week_from_u8(v: u8) -> Result<DayOfWeek, embassy_stm32::rtc::DateTimeError> {
+    Ok(match v {
+        1 => DayOfWeek::Monday,
+        2 => DayOfWeek::Tuesday,
+        3 => DayOfWeek::Wednesday,
+        4 => DayOfWeek::Thursday,
+        5 => DayOfWeek::Friday,
+        6 => DayOfWeek::Saturday,
+        7 => DayOfWeek::Sunday,
+        x => return Err(embassy_stm32::rtc::DateTimeError::InvalidDayOfWeek(x)),
+    })
 }

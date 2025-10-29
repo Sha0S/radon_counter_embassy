@@ -1,7 +1,7 @@
 [package]
 name = "radon_counter_embassy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 embassy-stm32 = { version = "0", features = ["defmt", "stm32u073cc", "unstable-pac", "time-driver-any", "exti", "memory-x"]  }

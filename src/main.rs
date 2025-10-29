@@ -473,6 +473,10 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     )
                 {
                     rtc.lock().await.set_datetime(new_time);
+                    class.write_packet(&[1]).await?;
+                } else {
+                    class.write_packet(&[0]).await?;
+                    error!("Incorrect DateTime recived!");
                 }
             }
             USB_COMMAND_EEPROM_CLEAR => match mc_24cs256::clear(&mut *i2c_bus.lock().await).await {

@@ -45,6 +45,21 @@ pub async fn read_byte_random(i2c: &mut I2c<'_, Blocking, Master>, address: u16)
     Ok(buf[0])
 }
 
+/*
+    One page = 64 bytes
+    Total of 512 pages
+*/
+
+pub async fn read_32_bytes(i2c: &mut I2c<'_, Blocking, Master>, half_page: u16) -> Result<[u8;32],i2c::Error> {
+    let address_bytes = (EEPROM_START_ADDRESS+half_page*32).to_be_bytes();
+    i2c.blocking_write(I2C_ADDRESS_EEPROM, &[address_bytes[0], address_bytes[1]])?;
+
+    let mut buf = [0u8;32];
+    i2c.blocking_read(I2C_ADDRESS_EEPROM, &mut buf)?;
+
+    Ok(buf)
+}
+
 pub async fn clear(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error> {
 
     let mut write = [0u8;66];

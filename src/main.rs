@@ -472,7 +472,10 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         0,
                     )
                 {
-                    rtc.lock().await.set_datetime(new_time);
+                    if rtc.lock().await.set_datetime(new_time).is_err() {
+                        error!("Failed to set RTC!");
+                    }
+
                     class.write_packet(&[1]).await?;
                 } else {
                     class.write_packet(&[0]).await?;
@@ -489,6 +492,38 @@ async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     error!("24CS256: Clear failed! {}", e);
                 }
             },
+            USB_COMMAND_EEPROM_READ => {
+                let mut i2c = i2c_bus.lock().await; // locking the i2c bus for the durration
+
+                /*
+                    Tried to send a whole page (64 bytes) at once instead, as it is equal to the max packet size, but 
+                    had issues with it, as it would not send the requested data. 32 bytes works.
+                */
+
+
+                // a) we recive a page number
+                if n > 1 {
+                    info!("Requesting page #{} of EEPROM", data[1]);
+                    if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, data[1] as u16).await {
+                            class.write_packet(&page).await?;
+                    } else {
+                            class.write_packet(&[1]).await?;
+                    }
+                } else {
+                 // b) we don't, and have to read 1024 32 byte pages
+                 // This takes a while, less than 10 secs, but it still blocks the i2c bus in that time
+                 // might cause issues
+                    for i in 0..1024u16 {
+                        if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, i).await {
+                            class.write_packet(&page).await?;
+                        } else {
+                            class.write_packet(&[1]).await?;
+                        }
+                    }
+                }
+
+                
+            }
             USB_COMMAND_HV_PSU_ON => {
                 HV_PSU_ENABLE.store(true, Ordering::Relaxed);
                 class.write_packet(&[1]).await?;

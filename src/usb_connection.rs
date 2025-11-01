@@ -156,11 +156,11 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 class.write_packet(&[1]).await?;
             }
             USB_COMMAND_SSR_ON => {
-                ssr.lock().await.is_set_high();
+                ssr.lock().await.set_high();
                 class.write_packet(&[1]).await?;
             }
             USB_COMMAND_SSR_OFF => {
-                ssr.lock().await.is_set_low();
+                ssr.lock().await.set_low();
                 class.write_packet(&[1]).await?;
             }
             _ => {

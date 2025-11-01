@@ -4,7 +4,6 @@
 
 /*
     ToDo:
-        - write measurement data to EEPROM
         - add function for user button and switch.
             - button (PB3)  -> briefly display Soc on the status LEDs?
             - switch (PA15) -> enable/disable data acq, put device to standby
@@ -361,39 +360,82 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus) {
         now = rtc.lock().await.now().unwrap();
         if now.minute() != old.minute() {
             old = now;
-
-            info!("Pulse counter: {}", PULSE_COUNTER.load(Ordering::Relaxed));
+            let pulse_counter = PULSE_COUNTER.load(Ordering::Relaxed);
+            PULSE_COUNTER.store(0u16, Ordering::Relaxed);
+            info!("Pulse counter: {}", pulse_counter);
 
             {
                 let mut i2c = i2c_bus.lock().await;
-                match stc3315::read_SOC(&mut i2c) {
-                    Ok(soc) => info!("STC3315 - SoC: {}", soc),
-                    Err(e) => error!("STC3315 error: {}", e),
-                }
+                let soc = match stc3315::read_SOC(&mut i2c) {
+                    Ok(soc) => {info!("STC3315 - SoC: {}", soc); soc},
+                    Err(e) => {error!("STC3315 error: {}", e); 0u8},
+                };
 
-                match sht40::read(&mut i2c).await {
-                    Ok(temp_and_rh) => info!(
-                        "SHT40: {}, {}",
-                        temp_and_rh.temperature, temp_and_rh.relative_humidity
-                    ),
-                    Err(e) => error!("SHT40 error: {}", e),
-                }
+                let t_rh = match sht40::read_raw(&mut i2c).await {
+                    Ok(temp_and_rh) => {
+                        info!("SHT40: {}",temp_and_rh ); 
+                        [temp_and_rh[0], temp_and_rh[1], temp_and_rh[3], temp_and_rh[4]]}
+                    Err(e) => {error!("SHT40 error: {}", e); [0u8;4]},
+                };
 
-                let r = match mc_24cs256::read_byte_random(&mut i2c, 0u16).await {
+                /*
+                    Data format:
+                        timestamp: year - month - day - hour - minute -> 5 bytes (could compress to 26 bit)
+                        soc: 1 byte
+                        temperature and rh: 6 bytes for the whole read, can reduce it to 4/2 bytes
+                        pulse counter: 2 bytes, reset after each write
+
+                    Max 14 bytes, but we don't need the CRC saved for temp/rh, which leaves it at 12 bytes.
+                    The EEPROM has a capacity of 32kBytes, enough for 2730 entries or 113 days.
+
+                    (Could fursther reduce it further if needed.)
+
+                    EEPROM: the first two bytes contain the adress of the last saved record
+                */
+
+                static RECORDS_START_ADDRESS: u16 = 0x02;
+                static RECORDS_LENGTH: u16 = 0x0C;
+
+                let mut address = match mc_24cs256::read_u16_random(&mut i2c, 0u16).await {
                     Ok(r) => {
                         info!("24CS256 read: {}", r);
                         r
                     }
                     Err(e) => {
                         error!("24CS256 read error: {}", e);
-                        0
+                        continue; // Don't proceed with the write operation if the read failed.
                     }
                 };
 
-                match mc_24cs256::write_byte(&mut i2c, 0u16, r.wrapping_add(1)).await {
-                    Ok(_) => {}
-                    Err(e) => error!("24CS256 write error: {}", e),
+                // check boundaries
+                if address < RECORDS_START_ADDRESS || address + RECORDS_LENGTH > mc_24cs256::EEPROM_END_ADDRESS {
+                    address = RECORDS_START_ADDRESS;
                 }
+
+                // write next address
+                if let Err(e) = mc_24cs256::write_u16(&mut i2c, 0u16, address + RECORDS_LENGTH).await  {
+                    error!("24CS256 adress write error to 0x00: {}", e);
+                    continue; // Don't proceed with the write operation
+                }
+
+                // write data
+                let address_bytes = address.to_be_bytes();
+                let pulse_bytes = pulse_counter.to_be_bytes();
+                let data = [
+                        address_bytes[0], address_bytes[1],
+                        (old.year() -2000) as u8, old.month(), old.day(), old.hour(), old.minute(),
+                        soc,
+                        t_rh[0], t_rh[1], t_rh[2], t_rh[3],
+                        pulse_bytes[0], pulse_bytes[1]
+                    ];
+
+                if let Err(e) = mc_24cs256::write_raw_data(&mut i2c, &data ) .await  
+                {
+                    error!("24CS256 data write error to {}: {}", address, e);
+                    continue;
+                }
+
+                info!("Write data: success! Address: {}", address)
             }
         }
         Timer::after_secs(10).await;

@@ -44,6 +44,7 @@ mod usb_connection;
 
 type I2c1Bus = Mutex<NoopRawMutex, I2c<'static, Blocking, i2c::Master>>;
 type RtcShared = Mutex<NoopRawMutex, Rtc>;
+type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(false);
@@ -125,6 +126,16 @@ async fn main(spawner: Spawner) {
 
     let pulse_in = ExtiInput::new(p.PC13, p.EXTI13, Pull::None);
     spawner.spawn(pulse_detection(pulse_in)).unwrap();
+
+    /*
+        SSR control (PB2)
+    */
+
+    let ssr = Output::new(p.PB2, Level::Low, Speed::Low);
+    static SSR_CTRL: StaticCell<OutputShared> = StaticCell::new();
+    let ssr_ctrl = SSR_CTRL.init(Mutex::new(ssr));
+
+
 
     /*
         RTC
@@ -217,13 +228,12 @@ async fn main(spawner: Spawner) {
         loop {
             class.wait_connection().await;
             info!("Connected");
-            let _ = usb_connection::handle_usb_connection(&mut class, i2c_bus, rtc_shared).await;
+            let _ = usb_connection::handle_usb_connection(&mut class, i2c_bus, rtc_shared, ssr_ctrl).await;
             info!("Disconnected");
         }
     };
 
     // Run everything concurrently.
-    // If we had made everything `'static` above instead, we could do this using separate tasks instead.
     join(usb_future, class_future).await;
 
     // Will never reach here

@@ -3,7 +3,7 @@ use defmt::{error, info};
 use embassy_stm32::{rtc::{DateTime, DayOfWeek}, usb};
 use embassy_usb::{class::cdc_acm, driver::EndpointError};
 
-use crate::{HV_PSU_ENABLE, I2c1Bus, PULSE_COUNTER, RtcShared, mc_24cs256, sht40, stc3315};
+use crate::{HV_PSU_ENABLE, I2c1Bus, OutputShared, PULSE_COUNTER, RtcShared, mc_24cs256, sht40, stc3315};
 
 /*
     USB COMMUNICTAION
@@ -32,11 +32,15 @@ const USB_COMMAND_EEPROM_READ: u8 = 0x24;       // read the contents of the EEPR
 const USB_COMMAND_HV_PSU_ON: u8 = 0x30;
 const USB_COMMAND_HV_PSU_OFF: u8 = 0x34;
 
+const USB_COMMAND_SSR_ON: u8 = 0x40;
+const USB_COMMAND_SSR_OFF: u8 = 0x44;
+
 // The task handling the response to the incomming USB communication
 pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
     class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>,
     i2c_bus: &'static I2c1Bus,
     rtc: &'static RtcShared,
+    ssr: &'static OutputShared<'static>
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
@@ -149,6 +153,14 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
             }
             USB_COMMAND_HV_PSU_OFF => {
                 HV_PSU_ENABLE.store(false, Ordering::Relaxed);
+                class.write_packet(&[1]).await?;
+            }
+            USB_COMMAND_SSR_ON => {
+                ssr.lock().await.is_set_high();
+                class.write_packet(&[1]).await?;
+            }
+            USB_COMMAND_SSR_OFF => {
+                ssr.lock().await.is_set_low();
                 class.write_packet(&[1]).await?;
             }
             _ => {

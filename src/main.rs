@@ -4,9 +4,6 @@
 
 /*
     ToDo:
-        - add function for user button and switch.
-            - button (PB3)  -> briefly display Soc on the status LEDs?
-            - switch (PA15) -> enable/disable data acq, put device to standby
         - SD card
         - SSR control (PB2)
 
@@ -143,6 +140,12 @@ async fn main(spawner: Spawner) {
     spawner.spawn(user_button_fn(user_button)).unwrap();
 
     /*
+        Switch (PA15)
+    */
+
+    let switch = Input::new(p.PA15, Pull::None);
+
+    /*
         RTC
     */
 
@@ -152,7 +155,7 @@ async fn main(spawner: Spawner) {
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 
-    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus)).unwrap();
+    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus, switch)).unwrap();
 
     /*
         STC3315 + Status LEDs
@@ -370,7 +373,7 @@ async fn comparator_1(mut pwm: SimplePwm<'static, peripherals::TIM2>) {
 // RTC "alarm", uses pooling as proper alarms are not supported (?) yet
 // Set to trigger every min while testing. Final product should trigger every hour
 #[embassy_executor::task]
-async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus) {
+async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: Input<'static>) {
     let mut old = rtc.lock().await.now().unwrap();
     let mut now;
     loop {
@@ -381,6 +384,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus) {
             PULSE_COUNTER.store(0u16, Ordering::Relaxed);
             info!("Pulse counter: {}", pulse_counter);
 
+            if switch.is_high()
             {
                 let mut i2c = i2c_bus.lock().await;
                 let soc = match stc3315::read_SOC(&mut i2c) {

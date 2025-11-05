@@ -47,6 +47,7 @@ type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(false);
+static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
 bind_interrupts!(struct Irqs {
     USB_DRD_FS => usb::InterruptHandler<peripherals::USB>;
@@ -134,7 +135,12 @@ async fn main(spawner: Spawner) {
     static SSR_CTRL: StaticCell<OutputShared> = StaticCell::new();
     let ssr_ctrl = SSR_CTRL.init(Mutex::new(ssr));
 
+    /*
+        User button (PB3)
+    */
 
+    let user_button = ExtiInput::new(p.PB3, p.EXTI3, Pull::None);
+    spawner.spawn(user_button_fn(user_button)).unwrap();
 
     /*
         RTC
@@ -245,7 +251,7 @@ async fn status_LED_control(
     i2c_bus: &'static I2c1Bus,
 ) {
     loop {
-        if charging_detection.is_low() {
+        if charging_detection.is_low() || USER_BUTTON.load(Ordering::Relaxed) {
             // Charging from USB
             // Check SoC
             if let Ok(soc) = stc3315::read_SOC(&mut *i2c_bus.lock().await) {
@@ -279,7 +285,7 @@ async fn status_LED_control(
                 LED.set_low();
             }
 
-            Timer::after_secs(10).await;
+            Timer::after_secs(1).await;
         }
     }
 }
@@ -290,6 +296,17 @@ async fn pulse_detection(mut pulse_in: ExtiInput<'static>) {
         pulse_in.wait_for_rising_edge().await;
         let current_value = PULSE_COUNTER.load(Ordering::Relaxed);
         PULSE_COUNTER.store(current_value.wrapping_add(1), Ordering::Relaxed);
+    }
+}
+
+
+#[embassy_executor::task]
+async fn user_button_fn(mut button: ExtiInput<'static>) {
+    loop {
+        button.wait_for_rising_edge().await;
+        USER_BUTTON.store(true, Ordering::Relaxed);
+        Timer::after_secs(5).await;
+        USER_BUTTON.store(false, Ordering::Relaxed);
     }
 }
 

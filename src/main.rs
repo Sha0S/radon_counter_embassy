@@ -136,7 +136,7 @@ async fn main(spawner: Spawner) {
         User button (PB3)
     */
 
-    let user_button = ExtiInput::new(p.PB3, p.EXTI3, Pull::None);
+    let user_button = ExtiInput::new(p.PB3, p.EXTI3, Pull::Up);
     spawner.spawn(user_button_fn(user_button)).unwrap();
 
     /*
@@ -306,7 +306,8 @@ async fn pulse_detection(mut pulse_in: ExtiInput<'static>) {
 #[embassy_executor::task]
 async fn user_button_fn(mut button: ExtiInput<'static>) {
     loop {
-        button.wait_for_rising_edge().await;
+        button.wait_for_falling_edge().await;
+        debug!("Button pressed!");
         USER_BUTTON.store(true, Ordering::Relaxed);
         Timer::after_secs(5).await;
         USER_BUTTON.store(false, Ordering::Relaxed);

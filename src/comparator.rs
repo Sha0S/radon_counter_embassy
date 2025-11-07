@@ -2,8 +2,7 @@
     There is no support for comparators in Embassy (and neither is it in the rust embeded HALs),
     so it has to be directly configured by writing to the registers.
 
-    It's status can be check with pooling or interrupts.
-    For interrrupts it uses EXTI Line 17 and 18.
+    For interrrupts it uses EXTI Line 17 and 18, and NVIC position 12. (ADC + COMP 1/2 uses the same interrupt)
 */
 
 use defmt::info;

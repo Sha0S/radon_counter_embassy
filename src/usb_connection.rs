@@ -1,6 +1,6 @@
 use core::sync::atomic::Ordering;
 use defmt::{error, info};
-use embassy_stm32::{rtc::{DateTime, DayOfWeek}, usb};
+use embassy_stm32::{peripherals::TIM2, rtc::{DateTime, DayOfWeek}, timer::simple_pwm::SimplePwmChannel, usb};
 use embassy_usb::{class::cdc_acm, driver::EndpointError};
 
 use crate::{HV_PSU_ENABLE, I2c1Bus, OutputShared, PULSE_COUNTER, RtcShared, mc_24cs256, sht40, stc3315};
@@ -40,7 +40,8 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
     class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>,
     i2c_bus: &'static I2c1Bus,
     rtc: &'static RtcShared,
-    ssr: &'static OutputShared<'static>
+    ssr: &'static OutputShared<'static>,
+    pwm: &mut SimplePwmChannel<'_, TIM2>
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
@@ -149,10 +150,12 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
             }
             USB_COMMAND_HV_PSU_ON => {
                 HV_PSU_ENABLE.store(true, Ordering::Relaxed);
+                pwm.enable();
                 class.write_packet(&[1]).await?;
             }
             USB_COMMAND_HV_PSU_OFF => {
                 HV_PSU_ENABLE.store(false, Ordering::Relaxed);
+                pwm.disable();
                 class.write_packet(&[1]).await?;
             }
             USB_COMMAND_SSR_ON => {

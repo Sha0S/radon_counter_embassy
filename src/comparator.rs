@@ -5,8 +5,12 @@
     For interrrupts it uses EXTI Line 17 and 18, and NVIC position 12. (ADC + COMP 1/2 uses the same interrupt)
 */
 
+use core::sync::atomic::Ordering;
+
 use defmt::info;
 use embassy_stm32::interrupt;
+
+use crate::HV_PSU_ENABLE;
 
 /// Comparator 1 control and status register
 const COMP1_CSR: *mut u32 = 0x4001_0200u32 as *mut u32;
@@ -62,24 +66,24 @@ const CSR_DEFAULT: u32 = 0b0000_0000_0000_0010_0000_0010_0010_0001;
 pub fn set_default_csr() {
     unsafe {
         core::ptr::write_volatile(COMP1_CSR, CSR_DEFAULT);
-        //core::ptr::write_volatile(COMP2_CSR, CSR_DEFAULT);
+        core::ptr::write_volatile(COMP2_CSR, CSR_DEFAULT);
     }
 }
 
 /// Sets EXTI_RTSR1 bit 17 & 18 to 1. Enabling rising edge interrupts for COMP 1 & 2;
 pub fn enable_interrupts() {
     unsafe {
-        let rtsr = core::ptr::read_volatile(EXTI_RTSR1) | COMP1_EXTI_LINE;
+        let rtsr = core::ptr::read_volatile(EXTI_RTSR1) | COMP1_EXTI_LINE | COMP2_EXTI_LINE;
         core::ptr::write_volatile(EXTI_RTSR1, rtsr); // set rising edge detection
-        core::ptr::write_volatile(EXTI_RPR1, COMP1_EXTI_LINE); // clear pending register
+        core::ptr::write_volatile(EXTI_RPR1, COMP1_EXTI_LINE | COMP2_EXTI_LINE); // clear pending register
 
         core::ptr::write_volatile(EXTI_FTSR1, rtsr); // set falling edge detection
-        core::ptr::write_volatile(EXTI_FPR1, COMP1_EXTI_LINE); // clear pending register
+        core::ptr::write_volatile(EXTI_FPR1, COMP1_EXTI_LINE | COMP2_EXTI_LINE); // clear pending register
 
-        let emr = core::ptr::read_volatile(EXTI_EMR1) & !COMP1_EXTI_LINE;
+        let emr = core::ptr::read_volatile(EXTI_EMR1) & !(COMP1_EXTI_LINE | COMP2_EXTI_LINE);
         core::ptr::write_volatile(EXTI_EMR1, emr); // disable event mode
 
-        let imr = core::ptr::read_volatile(EXTI_IMR1) | COMP1_EXTI_LINE;
+        let imr = core::ptr::read_volatile(EXTI_IMR1) | COMP1_EXTI_LINE | COMP2_EXTI_LINE;
         core::ptr::write_volatile(EXTI_IMR1, imr); // enable interrupt mode
 
         core::ptr::write_volatile(NVIC_ICPR0, NVIC_ADC_COMP); // clear any pending interrupts
@@ -115,22 +119,32 @@ pub fn read_comp2_value() -> bool {
 const TIM2_CCER: *mut u32 = 0x4000_0020u32 as *mut u32;
 const CH4_ENABLE: u32 = 0x1u32 << 12;
 
+/*
+    Could also check which comparator has pending interrupt first,
+    but it is kind of irrelevant
+*/
 #[interrupt]
 unsafe fn ADC_COMP1_2() {
     let comp1 = read_comp1_value();
+    let comp2 = read_comp2_value();
+
     unsafe {
         let ccer = core::ptr::read_volatile(TIM2_CCER);
-        if comp1 {
-            core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
-            //info!("PWM off");
+        if HV_PSU_ENABLE.load(Ordering::Relaxed) {
+                if comp2 { // Safety: Disable HV power gen
+                    HV_PSU_ENABLE.store(false, Ordering::Relaxed);
+                    core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
+                } else if comp1 {
+                    core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
+                } else {
+                    core::ptr::write_volatile(TIM2_CCER, ccer | CH4_ENABLE); // enables PWM output
+                }
         } else {
-            core::ptr::write_volatile(TIM2_CCER, ccer | CH4_ENABLE); // enables PWM output
-            //info!("PWM on");
+            core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
         }
-    }
-    // reset EXTI_RPR1
-    unsafe {
-        core::ptr::write_volatile(EXTI_RPR1, COMP1_EXTI_LINE);
+
+        // reset EXTI_RPR1
+        core::ptr::write_volatile(EXTI_RPR1, COMP1_EXTI_LINE | COMP2_EXTI_LINE);
         core::ptr::write_volatile(NVIC_ICPR0, NVIC_ADC_COMP);
     }
 }

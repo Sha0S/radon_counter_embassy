@@ -43,7 +43,7 @@ type RtcShared = Mutex<NoopRawMutex, Rtc>;
 type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
-static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(false);
+static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
 static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
 bind_interrupts!(struct Irqs {
@@ -104,9 +104,12 @@ async fn main(spawner: Spawner) {
         khz(10),
         Default::default(),
     );
-    let mut pwm = pwm_controler.ch4();
+    let mut pwm  = pwm_controler.ch4();
     pwm.set_duty_cycle_percent(20);
-    pwm.enable();
+
+    if HV_PSU_ENABLE.load(Ordering::Relaxed) {
+        pwm.enable();
+    }
 
     /*
         pulse_in (PC13) --> pulse_counter
@@ -227,7 +230,7 @@ async fn main(spawner: Spawner) {
         loop {
             class.wait_connection().await;
             info!("Connected");
-            let _ = usb_connection::handle_usb_connection(&mut class, i2c_bus, rtc_shared, ssr_ctrl).await;
+            let _ = usb_connection::handle_usb_connection(&mut class, i2c_bus, rtc_shared, ssr_ctrl, &mut pwm).await;
             info!("Disconnected");
         }
     };

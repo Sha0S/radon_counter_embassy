@@ -77,7 +77,7 @@ pub fn enable_interrupts() {
         core::ptr::write_volatile(EXTI_FPR1, COMP1_EXTI_LINE); // clear pending register
 
         let emr = core::ptr::read_volatile(EXTI_EMR1) & !COMP1_EXTI_LINE;
-        core::ptr::write_volatile(EXTI_EMR1, emr); // disable even mode
+        core::ptr::write_volatile(EXTI_EMR1, emr); // disable event mode
 
         let imr = core::ptr::read_volatile(EXTI_IMR1) | COMP1_EXTI_LINE;
         core::ptr::write_volatile(EXTI_IMR1, imr); // enable interrupt mode

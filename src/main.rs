@@ -4,12 +4,11 @@
 
 /*
     ToDo:
+        - PULSE counter: interrupt vs task?
         - SD card
         - SSR control (PB2)
-
-        - HV PSU frequency, duty_cycle is placeholder
-        - COMP1 should use interrupts instead of pooling.
-          But it seems that comparators are not supported in Embassy, so have to do it "raw"
+        - COMP2 as a safety measure against ovevoltage?
+        - LEDs: use them to display error codes?
 */
 
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};

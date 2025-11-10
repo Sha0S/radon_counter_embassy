@@ -7,7 +7,7 @@
 
 use core::sync::atomic::Ordering;
 
-use defmt::info;
+use defmt::{error, info};
 use embassy_stm32::interrupt;
 
 use crate::HV_PSU_ENABLE;
@@ -44,29 +44,30 @@ const EXTI_EMR1: *mut u32 = (EXTI + 0x084u32) as *mut u32;
 /*
     Dirty hack:
     The following registry value works, but it overwrites multiple reserved bits, whose values we where supposed to keep
-    0b0000_0000_0000_0010_0000_0010_0010_0001
+    0b0000_0000_0000_0110_0000_0010_0010_0001
     - 0000_000 -> bit 31-30 is status reg (LOCK and VALUE), can't write. Next 5 are reserved.
     - BLANKSEL: 0_0000 - no blanking
-    - PWRMODE:  00   - high speed
-    - HYST:     10   - medium hysteresis
-    - polarity: 0    - non-inverted
-    - WINOUT:   0    - window mode disabled
-    - WINMODE:  000  - noninverting input selector for window mode (not used)
-    - INPSEL:   010  - input pin selection: PA1 and PA3
-    - INMSEL:   0010 - 3/4 Vref,int
+    - PWRMODE:  01     - medium speed
+    - HYST:     10     - medium hysteresis
+    - polarity: 0      - non-inverted
+    - WINOUT:   0      - window mode disabled
+    - WINMODE:  000    - noninverting input selector for window mode (not used)
+    - INPSEL:   010    - input pin selection: PA1 and PA3
+    - INMSEL:   0010   - 3/4 Vref,int
     - enabled:  0001
 
     The same value works for both COMPs.
 */
 
 /// Comparator control and status register default
-const CSR_DEFAULT: u32 = 0b0000_0000_0000_0010_0000_0010_0010_0001;
+const CSR_DEFAULT: u32 =   0b0000_0000_0000_0110_0000_0010_0010_0001;
+const CSR_DEFAULT_2: u32 = 0b0000_0000_0000_1100_0000_0010_0010_0001;
 
 /// Setting both of the comparator status registers to the CSR_DEFAULT value
 pub fn set_default_csr() {
     unsafe {
         core::ptr::write_volatile(COMP1_CSR, CSR_DEFAULT);
-        core::ptr::write_volatile(COMP2_CSR, CSR_DEFAULT);
+        core::ptr::write_volatile(COMP2_CSR, CSR_DEFAULT_2);
     }
 }
 
@@ -132,6 +133,7 @@ unsafe fn ADC_COMP1_2() {
         let ccer = core::ptr::read_volatile(TIM2_CCER);
         if HV_PSU_ENABLE.load(Ordering::Relaxed) {
                 if comp2 { // Safety: Disable HV power gen
+                    error!("COMP2 high: HV PSU disabled!");
                     HV_PSU_ENABLE.store(false, Ordering::Relaxed);
                     core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
                 } else if comp1 {
@@ -143,8 +145,9 @@ unsafe fn ADC_COMP1_2() {
             core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output
         }
 
-        // reset EXTI_RPR1
+        // reset EXTI_RPR1, EXTI_FPR1, NVIC_ICPR0
         core::ptr::write_volatile(EXTI_RPR1, COMP1_EXTI_LINE | COMP2_EXTI_LINE);
+        core::ptr::write_volatile(EXTI_FPR1, COMP1_EXTI_LINE | COMP2_EXTI_LINE);
         core::ptr::write_volatile(NVIC_ICPR0, NVIC_ADC_COMP);
     }
 }

@@ -88,8 +88,10 @@ async fn main(spawner: Spawner) {
     */
 
     // Setting up the comparators
-    comparator::enable_interrupts();
     comparator::set_default_csr();
+    // Wait for the COMPs to stabilize, or else they will generate a false high interrupt
+    Timer::after_micros(100).await; 
+    comparator::enable_interrupts();
     // enable interrupts globally
     unsafe { cortex_m::interrupt::enable(); }
 

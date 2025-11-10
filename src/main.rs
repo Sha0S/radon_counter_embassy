@@ -43,6 +43,7 @@ type RtcShared = Mutex<NoopRawMutex, Rtc>;
 type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
+static PULSE_COUNTER_TOTAL: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
 static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
@@ -295,6 +296,9 @@ async fn pulse_detection(mut pulse_in: ExtiInput<'static>) {
         pulse_in.wait_for_rising_edge().await;
         let current_value = PULSE_COUNTER.load(Ordering::Relaxed);
         PULSE_COUNTER.store(current_value.wrapping_add(1), Ordering::Relaxed);
+
+        let total_value = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed);
+        PULSE_COUNTER_TOTAL.store(total_value.wrapping_add(1), Ordering::Relaxed);
     }
 }
 
@@ -322,8 +326,9 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
         if now.minute() != old.minute() {
             old = now;
             let pulse_counter = PULSE_COUNTER.load(Ordering::Relaxed);
+            let pulse_counter_total = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed);
             PULSE_COUNTER.store(0u16, Ordering::Relaxed);
-            info!("Pulse counter: {}", pulse_counter);
+            info!("Pulse counter: {} - {}", pulse_counter, pulse_counter_total);
 
             if switch.is_high()
             {

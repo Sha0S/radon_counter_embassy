@@ -35,6 +35,10 @@ const USB_COMMAND_HV_PSU_OFF: u8 = 0x34;
 const USB_COMMAND_SSR_ON: u8 = 0x40;
 const USB_COMMAND_SSR_OFF: u8 = 0x44;
 
+// Response:
+const USB_RESPONSE_OK: u8 = 0x00;
+const USB_RESPONSE_NOK: u8 = 0x01;
+
 // The task handling the response to the incomming USB communication
 pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
     class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>,
@@ -60,7 +64,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         class.write_packet(&response).await?;
                     }
                     Err(e) => {
-                        class.write_packet(&[0]).await?;
+                        class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         error!("SHT40: Raw read failed! {}", e);
                     }
                 }
@@ -70,13 +74,13 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     class.write_packet(&[response]).await?;
                 }
                 Err(e) => {
-                    class.write_packet(&[0]).await?;
+                    class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("SHT40: Raw read failed! {}", e);
                 }
             },
             USB_COMMAND_SET_RTC => {
                 if n != 8 {
-                    class.write_packet(&[0]).await?;
+                    class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("Packet size incorrect for setting RTC");
                 } else if let Ok(dow) = day_of_week_from_u8(buf[4])
                     && let Ok(new_time) = DateTime::from(
@@ -91,22 +95,23 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     )
                 {
                     if rtc.lock().await.set_datetime(new_time).is_err() {
+                        class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         error!("Failed to set RTC!");
+                    } else {
+                        class.write_packet(&[USB_RESPONSE_OK]).await?;
                     }
-
-                    class.write_packet(&[1]).await?;
                 } else {
-                    class.write_packet(&[0]).await?;
+                    class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("Incorrect DateTime recived!");
                 }
             }
             USB_COMMAND_EEPROM_CLEAR => match mc_24cs256::clear(&mut *i2c_bus.lock().await).await {
                 Ok(_) => {
-                    class.write_packet(&[1]).await?;
+                    class.write_packet(&[USB_RESPONSE_OK]).await?;
                     info!("24CS256: Clear OK!");
                 }
                 Err(e) => {
-                    class.write_packet(&[0]).await?;
+                    class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("24CS256: Clear failed! {}", e);
                 }
             },
@@ -127,11 +132,11 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, half_page_number).await {
                             class.write_packet(&page).await?;
                         } else {
-                            class.write_packet(&[1]).await?;
+                            class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         }
                     } else {
                         error!("Requested half-page number is outside of EEPROM capacity");
-                        class.write_packet(&[1]).await?;
+                        class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     }
                 } else {
                  // b) we don't, and have to read 1024 32 byte pages
@@ -141,7 +146,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, i).await {
                             class.write_packet(&page).await?;
                         } else {
-                            class.write_packet(&[1]).await?;
+                            class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         }
                     }
                 }
@@ -151,20 +156,20 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
             USB_COMMAND_HV_PSU_ON => {
                 HV_PSU_ENABLE.store(true, Ordering::Relaxed);
                 pwm.enable();
-                class.write_packet(&[1]).await?;
+                class.write_packet(&[USB_RESPONSE_OK]).await?;
             }
             USB_COMMAND_HV_PSU_OFF => {
                 HV_PSU_ENABLE.store(false, Ordering::Relaxed);
                 pwm.disable();
-                class.write_packet(&[1]).await?;
+                class.write_packet(&[USB_RESPONSE_OK]).await?;
             }
             USB_COMMAND_SSR_ON => {
                 ssr.lock().await.set_high();
-                class.write_packet(&[1]).await?;
+                class.write_packet(&[USB_RESPONSE_OK]).await?;
             }
             USB_COMMAND_SSR_OFF => {
                 ssr.lock().await.set_low();
-                class.write_packet(&[1]).await?;
+                class.write_packet(&[USB_RESPONSE_OK]).await?;
             }
             _ => {
                 error!("Unknown command: {}", data);

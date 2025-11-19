@@ -7,8 +7,8 @@
         - PULSE counter: interrupt vs task?
         - SD card
         - SSR control (PB2)
-        - COMP2 as a safety measure against ovevoltage?
         - LEDs: use them to display error codes?
+        - Power saving mode
 */
 
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -55,20 +55,17 @@ bind_interrupts!(struct Irqs {
 async fn main(spawner: Spawner) {
     info!("Starting up");
 
-    let mut system_config = embassy_stm32::Config::default();
+
+    /*
+        I2C: requires APB 2  MHz
+        USB: requires APB 10 MHz
+    */
+     let mut system_config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
-        system_config.rcc.hsi = true;
         system_config.rcc.ls = LsConfig::default_lse();
-        system_config.rcc.pll = Some(Pll {
-            source: PllSource::HSI, // 16 MHz
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL7,
-            divp: None,
-            divq: None,
-            divr: Some(PllRDiv::DIV2), // 56 MHz
-        });
-        system_config.rcc.sys = Sysclk::PLL1_R;
+        system_config.rcc.msi = Some(MSIRange::RANGE16M);
+        system_config.rcc.sys = Sysclk::MSI;
         system_config.rcc.hsi48 = Some(Hsi48Config {
             sync_from_usb: true,
         }); // needed for USB
@@ -98,7 +95,7 @@ async fn main(spawner: Spawner) {
 
     // PWM gen
     let tim2_ch4 = PwmPin::new(p.PB11, embassy_stm32::gpio::OutputType::PushPull);
-    let mut pwm_controler = SimplePwm::new(
+    let mut pwm_controller = SimplePwm::new(
         p.TIM2,
         None,
         None,
@@ -107,8 +104,8 @@ async fn main(spawner: Spawner) {
         khz(10),
         Default::default(),
     );
-    let mut pwm  = pwm_controler.ch4();
-    pwm.set_duty_cycle_percent(20);
+    let mut pwm  = pwm_controller.ch4();
+    pwm.set_duty_cycle_percent(30);
 
     if HV_PSU_ENABLE.load(Ordering::Relaxed) {
         pwm.enable();
@@ -228,7 +225,7 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     let usb_future = usb.run();
 
-    // Hnadling connections
+    // Handling connections
     let class_future = async {
         loop {
             class.wait_connection().await;
@@ -323,7 +320,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
     let mut now;
     loop {
         now = rtc.lock().await.now().unwrap();
-        if now.minute() != old.minute() {
+        if now.hour() != old.hour() {
             old = now;
             let pulse_counter = PULSE_COUNTER.load(Ordering::Relaxed);
             let pulse_counter_total = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed);
@@ -347,21 +344,25 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
 
                 /*
                     Data format:
-                        timestamp: year - month - day - hour - minute -> 5 bytes (could compress to 26 bit)
+                        timestamp: year - month - day - hour - minute -> 5 bytes 
                         soc: 1 byte
-                        temperature and rh: 6 bytes for the whole read, can reduce it to 4/2 bytes
+                        temperature and rh: 6 bytes for the whole read, 4 bytes if we ignore the crc
                         pulse counter: 2 bytes, reset after each write
 
-                    Max 14 bytes, but we don't need the CRC saved for temp/rh, which leaves it at 12 bytes.
-                    The EEPROM has a capacity of 32kBytes, enough for 2730 entries or 113 days.
+                    12 bytes, but we have to respect the page boundaries. It makes writing much easier
+                    if no record overflows from one page to another. That means the the record size has to
+                    be a (whole number) fraction of 64!
+                    In the I used 16 bytes / record, where the last 4 bytes are reserved for later.
+                    Maybe CRC?
 
-                    (Could fursther reduce it further if needed.)
+                    The EEPROM has a capacity of 32kBytes, enough for 2048 entries or 85 days.
 
-                    EEPROM: the first two bytes contain the adress of the last saved record
+                    But, the first 16 bytes are reserved!
+                    The first two bytes contain the next write address, then next 14 can be used to store config.
                 */
 
-                static RECORDS_START_ADDRESS: u16 = 0x02;
-                static RECORDS_LENGTH: u16 = 0x0C;
+                static RECORDS_START_ADDRESS: u16 = 0x0F;
+                static RECORDS_LENGTH: u16 = 0x10;
 
                 let mut address = match mc_24cs256::read_u16_random(&mut i2c, 0u16).await {
                     Ok(r) => {
@@ -381,7 +382,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
 
                 // write next address
                 if let Err(e) = mc_24cs256::write_u16(&mut i2c, 0u16, address + RECORDS_LENGTH).await  {
-                    error!("24CS256 adress write error to 0x00: {}", e);
+                    error!("24CS256 address write error to 0x00: {}", e);
                     continue; // Don't proceed with the write operation
                 }
 

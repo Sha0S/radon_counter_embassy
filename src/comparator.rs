@@ -1,8 +1,8 @@
 /*
-    There is no support for comparators in Embassy (and neither is it in the rust embeded HALs),
+    There is no support for comparators in Embassy (and neither is it in the rust embedded HALs),
     so it has to be directly configured by writing to the registers.
 
-    For interrrupts it uses EXTI Line 17 and 18, and NVIC position 12. (ADC + COMP 1/2 uses the same interrupt)
+    For interrupts it uses EXTI Line 17 and 18, and NVIC position 12. (ADC + COMP 1/2 uses the same interrupt)
 */
 
 use core::sync::atomic::Ordering;
@@ -51,17 +51,17 @@ const EXTI_EMR1: *mut u32 = (EXTI + 0x084u32) as *mut u32;
     - HYST:     10     - medium hysteresis
     - polarity: 0      - non-inverted
     - WINOUT:   0      - window mode disabled
-    - WINMODE:  000    - noninverting input selector for window mode (not used)
+    - WINMODE:  000    - non-inverting input selector for window mode (not used)
     - INPSEL:   010    - input pin selection: PA1 and PA3
-    - INMSEL:   0010   - 3/4 Vref,int
+    - INMSEL:   0010   - Vref,int
     - enabled:  0001
 
     The same value works for both COMPs.
 */
 
 /// Comparator control and status register default
-const CSR_DEFAULT: u32 =   0b0000_0000_0000_0110_0000_0010_0010_0001;
-const CSR_DEFAULT_2: u32 = 0b0000_0000_0000_1100_0000_0010_0010_0001;
+const CSR_DEFAULT: u32 =   0b0000_0000_0000_0110_0000_0010_0011_0001;
+const CSR_DEFAULT_2: u32 = 0b0000_0000_0000_1100_0000_0010_0011_0001;
 
 /// Setting both of the comparator status registers to the CSR_DEFAULT value
 pub fn set_default_csr() {

@@ -3,10 +3,10 @@ use defmt::{error, info};
 use embassy_stm32::{peripherals::TIM2, rtc::{DateTime, DayOfWeek}, timer::simple_pwm::SimplePwmChannel, usb};
 use embassy_usb::{class::cdc_acm, driver::EndpointError};
 
-use crate::{HV_PSU_ENABLE, I2c1Bus, OutputShared, PULSE_COUNTER, RtcShared, mc_24cs256, sht40, stc3315};
+use crate::{HV_PSU_ENABLE, I2c1Bus, OutputShared, PULSE_COUNTER, PULSE_COUNTER_TOTAL, RtcShared, mc_24cs256, sht40, stc3315};
 
 /*
-    USB COMMUNICTAION
+    USB COMMUNICATION
 */
 
 pub struct Disconnected {}
@@ -39,7 +39,7 @@ const USB_COMMAND_SSR_OFF: u8 = 0x44;
 const USB_RESPONSE_OK: u8 = 0x00;
 const USB_RESPONSE_NOK: u8 = 0x01;
 
-// The task handling the response to the incomming USB communication
+// The task handling the response to the incoming USB communication
 pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
     class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>,
     i2c_bus: &'static I2c1Bus,
@@ -55,7 +55,8 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
         match data[0] {
             USB_COMMAND_GET_PULSE_COUNTER => {
                 let pulse_counter_bytes = PULSE_COUNTER.load(Ordering::Relaxed).to_be_bytes();
-                let response = [pulse_counter_bytes[0], pulse_counter_bytes[1]];
+                let pulse_total_bytes = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed).to_be_bytes();
+                let response = [pulse_counter_bytes[0], pulse_counter_bytes[1], pulse_total_bytes[0], pulse_total_bytes[1]];
                 class.write_packet(&response).await?;
             }
             USB_COMMAND_GET_TEMP_AND_RH => {
@@ -75,7 +76,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 }
                 Err(e) => {
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
-                    error!("SHT40: Raw read failed! {}", e);
+                    error!("STC3315: read SoC failed! {}", e);
                 }
             },
             USB_COMMAND_SET_RTC => {
@@ -102,7 +103,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     }
                 } else {
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
-                    error!("Incorrect DateTime recived!");
+                    error!("Incorrect DateTime received!");
                 }
             }
             USB_COMMAND_EEPROM_CLEAR => match mc_24cs256::clear(&mut *i2c_bus.lock().await).await {
@@ -116,7 +117,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 }
             },
             USB_COMMAND_EEPROM_READ => {
-                let mut i2c = i2c_bus.lock().await; // locking the i2c bus for the durration
+                let mut i2c = i2c_bus.lock().await; // locking the i2c bus for the duration
 
                 /*
                     Tried to send a whole page (64 bytes) at once instead, as it is equal to the max packet size, but 
@@ -124,7 +125,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 */
 
 
-                // a) we recive a page number
+                // a) we receive a page number
                 if n > 2 {
                     let half_page_number = ((data[1] as u16 ) << 8 ) + data[2] as u16;
                     info!("Requesting half-page #{} of EEPROM", half_page_number);
@@ -140,7 +141,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     }
                 } else {
                  // b) we don't, and have to read 1024 32 byte pages
-                 // This takes a while, less than 10 secs, but it still blocks the i2c bus in that time
+                 // This takes a while, less than 10 (4-5?) secs, but it still blocks the i2c bus in that time
                  // might cause issues
                     for i in 0..1024u16 {
                         if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, i).await {

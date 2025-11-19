@@ -3,7 +3,7 @@
 // SHT 40
 // TODO: CRC check
 
-// The adress can be: 0x44, 0x45, 0x46
+// The address can be: 0x44, 0x45, 0x46
 const I2C_ADDRESS: u8 = 0x46;
 
 const SOFT_RESET: u8 = 0x94;
@@ -59,6 +59,7 @@ pub async fn read_raw(i2c: &mut i2c::I2c<'_,Blocking,Master>) -> Result<[u8;6], 
 
     let mut buf = [0u8; 6];
     i2c.blocking_read(I2C_ADDRESS, &mut buf)?;
+    info!("SHT40 response: {:?}", buf);
 
     Ok(buf)
 }

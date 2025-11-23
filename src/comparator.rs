@@ -10,7 +10,7 @@ use core::sync::atomic::Ordering;
 use defmt::{error, info};
 use embassy_stm32::interrupt;
 
-use crate::HV_PSU_ENABLE;
+use crate::{HV_PSU_ENABLE, HV_PSU_ERROR};
 
 /// Comparator 1 control and status register
 const COMP1_CSR: *mut u32 = 0x4001_0200u32 as *mut u32;
@@ -133,6 +133,7 @@ unsafe fn ADC_COMP1_2() {
         let ccer = core::ptr::read_volatile(TIM2_CCER);
         if HV_PSU_ENABLE.load(Ordering::Relaxed) {
                 if comp2 { // Safety: Disable HV power gen
+                    crate::set_error_flag(HV_PSU_ERROR);
                     error!("COMP2 high: HV PSU disabled!");
                     HV_PSU_ENABLE.store(false, Ordering::Relaxed);
                     core::ptr::write_volatile(TIM2_CCER, ccer & !CH4_ENABLE); // disables PWM output

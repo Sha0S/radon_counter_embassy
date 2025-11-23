@@ -11,7 +11,7 @@
         - Power saving mode
 */
 
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
@@ -46,6 +46,26 @@ static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static PULSE_COUNTER_TOTAL: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
 static USER_BUTTON: AtomicBool = AtomicBool::new(false);
+
+
+// Tracking errors during runtime
+const I2C_ERROR: u8 = 0u8;
+const SPI_ERROR: u8 = 1u8;
+const USB_ERROR: u8 = 2u8;
+const HV_PSU_ERROR: u8 = 4u8;
+const LOGIC_ERROR: u8 = 7u8;
+static ERROR_FLAGS: AtomicU8 = AtomicU8::new(0u8);
+
+fn set_error_flag(error: u8) {
+    if error > 7 {
+        set_error_flag(LOGIC_ERROR);
+        return;
+    }
+
+    ERROR_FLAGS.store(
+        ERROR_FLAGS.load(Ordering::Relaxed) | ( 1u8 << error ), 
+        Ordering::Relaxed);
+}
 
 bind_interrupts!(struct Irqs {
     USB_DRD_FS => usb::InterruptHandler<peripherals::USB>;
@@ -159,12 +179,17 @@ async fn main(spawner: Spawner) {
     {
         let mut i2c_locked = i2c_bus.lock().await;
         if let Err(e) = sht40::reset(&mut i2c_locked) {
+            set_error_flag(I2C_ERROR);
             error!("SHT40 reset: {}", e);
         }
 
-        let _ = stc3315::init(&mut i2c_locked);
+        if stc3315::init(&mut i2c_locked).is_err() {
+            set_error_flag(I2C_ERROR);
+        }
         Timer::after_micros(100).await;
-        let _ = stc3315::start(&mut i2c_locked);
+        if stc3315::start(&mut i2c_locked).is_err() {
+            set_error_flag(I2C_ERROR);
+        }
         Timer::after_micros(100).await;
     }
 
@@ -273,7 +298,8 @@ async fn status_LED_control(
                     }
                 }
             } else {
-                info!("Read failed!")
+                set_error_flag(I2C_ERROR);
+                error!("Read failed!")
             }
             Timer::after_secs(1).await;
         } else {
@@ -332,14 +358,14 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                 let mut i2c = i2c_bus.lock().await;
                 let soc = match stc3315::read_SOC(&mut i2c) {
                     Ok(soc) => {info!("STC3315 - SoC: {}", soc); soc},
-                    Err(e) => {error!("STC3315 error: {}", e); 0u8},
+                    Err(e) => {set_error_flag(I2C_ERROR); error!("STC3315 error: {}", e); 0u8},
                 };
 
                 let t_rh = match sht40::read_raw(&mut i2c).await {
                     Ok(temp_and_rh) => {
                         info!("SHT40: {}",temp_and_rh ); 
                         [temp_and_rh[0], temp_and_rh[1], temp_and_rh[3], temp_and_rh[4]]}
-                    Err(e) => {error!("SHT40 error: {}", e); [0u8;4]},
+                    Err(e) => {set_error_flag(I2C_ERROR); error!("SHT40 error: {}", e); [0u8;4]},
                 };
 
                 /*
@@ -370,6 +396,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                         r
                     }
                     Err(e) => {
+                        set_error_flag(I2C_ERROR);
                         error!("24CS256 read error: {}", e);
                         continue; // Don't proceed with the write operation if the read failed.
                     }
@@ -382,6 +409,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
 
                 // write next address
                 if let Err(e) = mc_24cs256::write_u16(&mut i2c, 0u16, address + RECORDS_LENGTH).await  {
+                    set_error_flag(I2C_ERROR);
                     error!("24CS256 address write error to 0x00: {}", e);
                     continue; // Don't proceed with the write operation
                 }
@@ -399,6 +427,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
 
                 if let Err(e) = mc_24cs256::write_raw_data(&mut i2c, &data ) .await  
                 {
+                    set_error_flag(I2C_ERROR);
                     error!("24CS256 data write error to {}: {}", address, e);
                     continue;
                 }

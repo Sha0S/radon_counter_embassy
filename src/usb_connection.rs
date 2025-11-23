@@ -3,7 +3,7 @@ use defmt::{error, info};
 use embassy_stm32::{peripherals::TIM2, rtc::{DateTime, DayOfWeek}, timer::simple_pwm::SimplePwmChannel, usb};
 use embassy_usb::{class::cdc_acm, driver::EndpointError};
 
-use crate::{HV_PSU_ENABLE, I2c1Bus, OutputShared, PULSE_COUNTER, PULSE_COUNTER_TOTAL, RtcShared, mc_24cs256, sht40, stc3315};
+use crate::{ERROR_FLAGS, HV_PSU_ENABLE, I2C_ERROR, I2c1Bus, OutputShared, PULSE_COUNTER, PULSE_COUNTER_TOTAL, RtcShared, USB_ERROR, mc_24cs256, sht40, stc3315};
 
 /*
     USB COMMUNICATION
@@ -13,13 +13,19 @@ pub struct Disconnected {}
 impl From<EndpointError> for Disconnected {
     fn from(val: EndpointError) -> Self {
         match val {
-            EndpointError::BufferOverflow => panic!("Buffer overflow"),
+            EndpointError::BufferOverflow => {
+                crate::set_error_flag(USB_ERROR);
+                panic!("Buffer overflow")
+            },
             EndpointError::Disabled => Disconnected {},
         }
     }
 }
 
 // Accepted commands:
+const USB_COMMAND_GET_ERROR_FLAGS: u8 = 0x02;   // returns the ERROR_FLAGS variable, u8
+const USB_COMMAND_RESET_ERROR_FLAGS: u8 = 0x03;   // reset the ERROR_FLAGS variable
+
 const USB_COMMAND_GET_PULSE_COUNTER: u8 = 0x04; // returns the pulse_counter variable, u16, [MSB, LSB]
 const USB_COMMAND_GET_TEMP_AND_RH: u8 = 0x08;   // returns the whole 6 bytes from SHT40 response, no conversion
 const USB_COMMAND_GET_BATTERY_SOC: u8 = 0x0C;   // returns the battery SoC from STC3315
@@ -65,6 +71,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         class.write_packet(&response).await?;
                     }
                     Err(e) => {
+                        crate::set_error_flag(I2C_ERROR);
                         class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         error!("SHT40: Raw read failed! {}", e);
                     }
@@ -75,12 +82,14 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     class.write_packet(&[response]).await?;
                 }
                 Err(e) => {
+                    crate::set_error_flag(I2C_ERROR);
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("STC3315: read SoC failed! {}", e);
                 }
             },
             USB_COMMAND_SET_RTC => {
                 if n != 8 {
+                    crate::set_error_flag(USB_ERROR);
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("Packet size incorrect for setting RTC");
                 } else if let Ok(dow) = day_of_week_from_u8(buf[4])
@@ -96,12 +105,14 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     )
                 {
                     if rtc.lock().await.set_datetime(new_time).is_err() {
+                        crate::set_error_flag(USB_ERROR);
                         class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         error!("Failed to set RTC!");
                     } else {
                         class.write_packet(&[USB_RESPONSE_OK]).await?;
                     }
                 } else {
+                    crate::set_error_flag(USB_ERROR);
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("Incorrect DateTime received!");
                 }
@@ -112,6 +123,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     info!("24CS256: Clear OK!");
                 }
                 Err(e) => {
+                    crate::set_error_flag(I2C_ERROR);
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("24CS256: Clear failed! {}", e);
                 }
@@ -133,10 +145,12 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, half_page_number).await {
                             class.write_packet(&page).await?;
                         } else {
+                            crate::set_error_flag(I2C_ERROR);
                             class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         }
                     } else {
                         error!("Requested half-page number is outside of EEPROM capacity");
+                        crate::set_error_flag(USB_ERROR);
                         class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     }
                 } else {
@@ -147,6 +161,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                         if let Ok(page) = mc_24cs256::read_32_bytes(&mut i2c, i).await {
                             class.write_packet(&page).await?;
                         } else {
+                            crate::set_error_flag(I2C_ERROR);
                             class.write_packet(&[USB_RESPONSE_NOK]).await?;
                         }
                     }
@@ -172,8 +187,17 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 ssr.lock().await.set_low();
                 class.write_packet(&[USB_RESPONSE_OK]).await?;
             }
+            USB_COMMAND_GET_ERROR_FLAGS => {
+                let error_flags = ERROR_FLAGS.load(Ordering::Relaxed);
+                class.write_packet(&[error_flags]).await?;
+            }
+            USB_COMMAND_RESET_ERROR_FLAGS => {
+                ERROR_FLAGS.store(0u8, Ordering::Relaxed);
+                class.write_packet(&[USB_RESPONSE_OK]).await?;
+            }
             _ => {
                 error!("Unknown command: {}", data);
+                crate::set_error_flag(USB_ERROR);
                 class.write_packet(data).await?;
             }
         }

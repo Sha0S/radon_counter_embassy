@@ -361,7 +361,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                     The first two bytes contain the next write address, then next 14 can be used to store config.
                 */
 
-                static RECORDS_START_ADDRESS: u16 = 0x0F;
+                static RECORDS_START_ADDRESS: u16 = 0x10;
                 static RECORDS_LENGTH: u16 = 0x10;
 
                 let mut address = match mc_24cs256::read_u16_random(&mut i2c, 0u16).await {

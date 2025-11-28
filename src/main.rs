@@ -442,6 +442,7 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                         pulse_bytes[0], pulse_bytes[1]
                     ];
 
+                crc.reset();
                 let crc_value = crc.feed_bytes(&data);
 
                 // write data

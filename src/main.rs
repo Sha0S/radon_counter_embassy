@@ -95,6 +95,9 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_stm32::init(system_config);
 
+    // enabling the charging of the super-cap connected to V_BAT
+    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbrs(false)); // charge V_BAT  through a 5 kOhms resistor
+    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbe(true));   // battery charging enable 
 
     // Shared I2C bus for tasks
     // Default is 100kHz, medium speed GPIO, no internal pull-ups
@@ -182,9 +185,9 @@ async fn main(spawner: Spawner) {
         RTC
     */
 
-    let mut rtc = Rtc::new(p.RTC, RtcConfig::default());
-    let default_dt = DateTime::from(2025, 10, 25, DayOfWeek::Saturday, 12, 40, 00, 00).unwrap();
-    rtc.set_datetime(default_dt).unwrap();
+    let rtc = Rtc::new(p.RTC, RtcConfig::default());
+    //let default_dt = DateTime::from(2025, 10, 25, DayOfWeek::Saturday, 12, 40, 00, 00).unwrap();
+    //rtc.set_datetime(default_dt).unwrap();
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 

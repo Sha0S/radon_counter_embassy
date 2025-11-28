@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_stm32::crc::Crc;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
@@ -160,6 +161,24 @@ async fn main(spawner: Spawner) {
     let switch = Input::new(p.PA15, Pull::None);
 
     /*
+        CRC peripheral
+    */
+
+    let crc = Crc::new(
+        p.CRC,
+        {
+            use embassy_stm32::crc::*;
+            Config::new(
+            InputReverseConfig::Byte,
+            true,
+            PolySize::Width32,
+            0xFFFFFFFF,
+            0x04C11DB7
+        ).unwrap()
+        }
+    );
+
+    /*
         RTC
     */
 
@@ -169,7 +188,7 @@ async fn main(spawner: Spawner) {
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 
-    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus, switch)).unwrap();
+    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus, switch, crc)).unwrap();
 
     /*
         STC3315 + Status LEDs
@@ -341,12 +360,13 @@ async fn user_button_fn(mut button: ExtiInput<'static>) {
 // RTC "alarm", uses pooling as proper alarms are not supported (?) yet
 // Set to trigger every min while testing. Final product should trigger every hour
 #[embassy_executor::task]
-async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: Input<'static>) {
+async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: Input<'static>, mut crc: Crc<'static>) {
     let mut old = rtc.lock().await.now().unwrap();
     let mut now;
     loop {
         now = rtc.lock().await.now().unwrap();
         if now.hour() != old.hour() {
+        //if now.minute() != old.minute() { // for debug purposes
             old = now;
             let pulse_counter = PULSE_COUNTER.load(Ordering::Relaxed);
             let pulse_counter_total = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed);
@@ -414,18 +434,18 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                     continue; // Don't proceed with the write operation
                 }
 
-                // write data
-                let address_bytes = address.to_be_bytes();
                 let pulse_bytes = pulse_counter.to_be_bytes();
                 let data = [
-                        address_bytes[0], address_bytes[1],
                         (old.year() -2000) as u8, old.month(), old.day(), old.hour(), old.minute(),
                         soc,
                         t_rh[0], t_rh[1], t_rh[2], t_rh[3],
                         pulse_bytes[0], pulse_bytes[1]
                     ];
 
-                if let Err(e) = mc_24cs256::write_raw_data(&mut i2c, &data ) .await  
+                let crc_value = crc.feed_bytes(&data);
+
+                // write data
+                if let Err(e) = mc_24cs256::write_data_record(&mut i2c, address, data, crc_value ) .await  
                 {
                     set_error_flag(I2C_ERROR);
                     error!("24CS256 data write error to {}: {}", address, e);

@@ -76,6 +76,32 @@ pub async fn write_raw_data(i2c: &mut I2c<'_, Blocking, Master>, data: &[u8]) ->
     Ok(())
 }
 
+pub async fn write_data_record(i2c: &mut I2c<'_, Blocking, Master>, address: u16, record: [u8;12], crc: u32) -> Result<(),i2c::Error> {
+    let address_bytes = address.to_be_bytes();
+    let crc_bytes = crc.to_be_bytes();
+
+    // This looks terrible, but there is no built-in method to join arrays
+    let data: [u8; 18] = [
+        address_bytes[0], address_bytes[1],
+        record[0], record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10], record[11],
+        crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]
+        ];
+
+    i2c.blocking_write(I2C_ADDRESS_EEPROM, &data)?;
+
+    // waiting for write to finish
+    // TODO: add a timeout!
+    while let Err(e) = i2c.blocking_write(I2C_ADDRESS_EEPROM, &[]) {
+        if e != i2c::Error::Nack {
+            return Err(e);
+        }
+
+        Timer::after_micros(10).await;
+    }
+
+    Ok(())
+}
+
 // READ
 
 pub async fn read_byte_random(i2c: &mut I2c<'_, Blocking, Master>, address: u16) -> Result<u8,i2c::Error> {

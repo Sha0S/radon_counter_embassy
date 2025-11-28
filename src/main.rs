@@ -53,6 +53,7 @@ static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 const I2C_ERROR: u8 = 0u8;
 const SPI_ERROR: u8 = 1u8;
 const USB_ERROR: u8 = 2u8;
+const RTC_ERROR: u8 = 3u8;
 const HV_PSU_ERROR: u8 = 4u8;
 const LOGIC_ERROR: u8 = 7u8;
 static ERROR_FLAGS: AtomicU8 = AtomicU8::new(0u8);

@@ -30,7 +30,8 @@ const USB_COMMAND_GET_PULSE_COUNTER: u8 = 0x04; // returns the pulse_counter var
 const USB_COMMAND_GET_TEMP_AND_RH: u8 = 0x08;   // returns the whole 6 bytes from SHT40 response, no conversion
 const USB_COMMAND_GET_BATTERY_SOC: u8 = 0x0C;   // returns the battery SoC from STC3315
 
-const USB_COMMAND_SET_RTC: u8 = 0x10;           // sets the RTC to the
+const USB_COMMAND_SET_RTC: u8 = 0x10;           // sets the RTC to the time provided
+const USB_COMMAND_GET_RTC: u8 = 0x12;           // reads the RTC
 
 const USB_COMMAND_EEPROM_CLEAR: u8 = 0x20;      // clear the contents of the EEPROM
 const USB_COMMAND_EEPROM_READ: u8 = 0x24;       // read the contents of the EEPROM
@@ -115,6 +116,22 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                     crate::set_error_flag(USB_ERROR);
                     class.write_packet(&[USB_RESPONSE_NOK]).await?;
                     error!("Incorrect DateTime received!");
+                }
+            }
+            USB_COMMAND_GET_RTC => {
+                if let Ok(now) = rtc.lock().await.now() {
+                    class.write_packet(&[
+                        USB_RESPONSE_OK, 
+                        (now.year() - 2000) as u8, 
+                        now.month(), 
+                        now.day(),
+                        now.hour(),
+                        now.minute()
+                    ]).await?;
+                } else {
+                    crate::set_error_flag(crate::RTC_ERROR);
+                    class.write_packet(&[USB_RESPONSE_NOK]).await?;
+                    error!("Failed to get current time from RTC!");
                 }
             }
             USB_COMMAND_EEPROM_CLEAR => match mc_24cs256::clear(&mut *i2c_bus.lock().await).await {

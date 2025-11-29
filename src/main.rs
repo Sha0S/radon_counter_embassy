@@ -4,54 +4,54 @@
 
 /*
     ToDo:
-        - PULSE counter: interrupt vs task?
         - SD card
         - SSR control (PB2)
         - LEDs: use them to display error codes?
-        - Power saving mode
 */
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+use embassy_futures::select::select3;
 use embassy_stm32::crc::Crc;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
-use embassy_stm32::rtc::{DateTime, DayOfWeek, Rtc, RtcConfig};
+use embassy_stm32::peripherals::TIM2;
+use embassy_stm32::rtc::{Rtc, RtcConfig};
 use embassy_stm32::time::khz;
-use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::{bind_interrupts, peripherals, usb};
+use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm, SimplePwmChannel};
+use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm;
+
 use static_cell::StaticCell;
 
 use defmt::*;
 use {defmt_rtt as _, panic_probe as _};
 
+mod comparator;
 mod mc_24cs256;
 mod sht40;
 mod stc3315;
 mod usb_connection;
-mod comparator;
 
 type I2c1Bus = Mutex<NoopRawMutex, I2c<'static, Blocking, i2c::Master>>;
 type RtcShared = Mutex<NoopRawMutex, Rtc>;
 type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
+type ExtiInputShared<'a> = Mutex<NoopRawMutex, ExtiInput<'a>>;
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static PULSE_COUNTER_TOTAL: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
 static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
-
 // Tracking errors during runtime
 const I2C_ERROR: u8 = 0u8;
-const SPI_ERROR: u8 = 1u8;
+//const SPI_ERROR: u8 = 1u8;
 const USB_ERROR: u8 = 2u8;
 const RTC_ERROR: u8 = 3u8;
 const HV_PSU_ERROR: u8 = 4u8;
@@ -65,40 +65,113 @@ fn set_error_flag(error: u8) {
     }
 
     ERROR_FLAGS.store(
-        ERROR_FLAGS.load(Ordering::Relaxed) | ( 1u8 << error ), 
-        Ordering::Relaxed);
+        ERROR_FLAGS.load(Ordering::Relaxed) | (1u8 << error),
+        Ordering::Relaxed,
+    );
 }
 
 bind_interrupts!(struct Irqs {
     USB_DRD_FS => usb::InterruptHandler<peripherals::USB>;
 });
 
+/// Leave low power run mode, switch to HSI for the clock source + turn on HSI48 for USB
+fn switch_to_hsi_2<'a>(
+    rcc: &'a mut Peri<'a, peripherals::RCC>,
+    pwm: &mut SimplePwmChannel<'_, TIM2>,
+) {
+    use embassy_stm32::pac::*;
+    use embassy_stm32::rcc::*;
+    info!("switch_to_hsi_2");
+
+    // TODO: dirty hack, would have to reconfigure the whole TIM2 between the two(three?) modes.
+    pwm.set_duty_cycle_fully_off();
+
+    // leave low power mode
+    PWR.cr1().write(|f| f.set_lpr(false));
+    while PWR.sr2().read().reglpf() {}
+
+    let mut rcc_config = Config::default();
+    {
+        rcc_config.hsi = true;
+        rcc_config.ls = LsConfig::default_lse();
+        rcc_config.msi = Some(MSIRange::RANGE2M);
+        rcc_config.sys = Sysclk::HSI;
+        rcc_config.hsi48 = Some(Hsi48Config {
+            sync_from_usb: true,
+        });
+        rcc_config.mux.clk48sel = mux::Clk48sel::HSI48;
+    }
+
+    reinit(rcc_config, rcc);
+
+    info!("switch_to_hsi_2 - done");
+}
+
+/// Disable HSI and HSI48, use MSI for clock source + enter low power run mode.
+fn switch_to_msi_2<'a>(
+    rcc: &'a mut Peri<'a, peripherals::RCC>,
+    pwm: &mut SimplePwmChannel<'_, TIM2>,
+) {
+    use embassy_stm32::pac::*;
+    use embassy_stm32::rcc::*;
+    info!("switch_to_msi_2");
+
+    // TODO: dirty hack, would have to reconfigure the whole TIM2 between the two(three?) modes.
+    pwm.set_duty_cycle_percent(30);
+
+    // reinit will not disable HSI?
+    // at least the Vcore current consumption will not drop back to the "normal" levels,
+    // unless I manually disable it. Additionally, disabling it after reinit causes to
+    // power consumption to drop sharply (to ~30uA), and the unit becomes unresponsive,
+    // or at least the delays caused by the Timer fns will become much larger than intended.
+    RCC.cfgr().write(|f| f.set_sw(Sysclk::MSI)); // manually switch MUX back to MSI
+    RCC.cr().write(|f| f.set_hsion(false)); // manually disable HSI
+
+    // reinit will NOT disable HSI48, if it was enabled before.
+    RCC.crrcr().write(|f| f.set_hsi48on(false)); // manually disable HSI48
+
+    reinit(
+        embassy_stm32::rcc::Config {
+            hsi: false,
+            ls: LsConfig::default_lse(),
+            msi: Some(MSIRange::RANGE1M),
+            sys: Sysclk::MSI,
+            hsi48: None,
+            ..Default::default()
+        },
+        rcc,
+    );
+
+    // enter low power mode
+    PWR.cr1().write(|f| f.set_lpr(true));
+
+    info!("switch_to_msi_2 - done");
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Starting up");
 
-
     /*
-        I2C: requires APB 2  MHz
-        USB: requires APB 10 MHz
+        I2C: requires APB 2  MHz (debatable)
+        USB: requires APB 10 MHz (confirmed)
     */
-     let mut system_config = embassy_stm32::Config::default();
+    let mut system_config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
+        system_config.rcc.hsi = false;
         system_config.rcc.ls = LsConfig::default_lse();
-        system_config.rcc.msi = Some(MSIRange::RANGE16M);
+        system_config.rcc.msi = Some(MSIRange::RANGE2M);
         system_config.rcc.sys = Sysclk::MSI;
-        system_config.rcc.hsi48 = Some(Hsi48Config {
-            sync_from_usb: true,
-        }); // needed for USB
-        system_config.rcc.mux.clk48sel = mux::Clk48sel::HSI48; // USB uses ICLK
+        system_config.rcc.hsi48 = None;
     }
 
-    let p = embassy_stm32::init(system_config);
+    let mut p = embassy_stm32::init(system_config);
+    let mut rcc = p.RCC;
 
     // enabling the charging of the super-cap connected to V_BAT
     embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbrs(false)); // charge V_BAT  through a 5 kOhms resistor
-    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbe(true));   // battery charging enable 
+    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbe(true)); // battery charging enable 
 
     // Shared I2C bus for tasks
     // Default is 100kHz, medium speed GPIO, no internal pull-ups
@@ -113,10 +186,12 @@ async fn main(spawner: Spawner) {
     // Setting up the comparators
     comparator::set_default_csr();
     // Wait for the COMPs to stabilize, or else they will generate a false high interrupt
-    Timer::after_micros(100).await; 
+    Timer::after_micros(100).await;
     comparator::enable_interrupts();
     // enable interrupts globally
-    unsafe { cortex_m::interrupt::enable(); }
+    unsafe {
+        cortex_m::interrupt::enable();
+    }
 
     // PWM gen
     let tim2_ch4 = PwmPin::new(p.PB11, embassy_stm32::gpio::OutputType::PushPull);
@@ -126,10 +201,10 @@ async fn main(spawner: Spawner) {
         None,
         None,
         Some(tim2_ch4),
-        khz(10),
+        khz(20),
         Default::default(),
     );
-    let mut pwm  = pwm_controller.ch4();
+    let mut pwm = pwm_controller.ch4();
     pwm.set_duty_cycle_percent(30);
 
     if HV_PSU_ENABLE.load(Ordering::Relaxed) {
@@ -168,19 +243,17 @@ async fn main(spawner: Spawner) {
         CRC peripheral
     */
 
-    let crc = Crc::new(
-        p.CRC,
-        {
-            use embassy_stm32::crc::*;
-            Config::new(
+    let crc = Crc::new(p.CRC, {
+        use embassy_stm32::crc::*;
+        Config::new(
             InputReverseConfig::Byte,
             true,
             PolySize::Width32,
             0xFFFFFFFF,
-            0x04C11DB7
-        ).unwrap()
-        }
-    );
+            0x04C11DB7,
+        )
+        .unwrap()
+    });
 
     /*
         RTC
@@ -192,7 +265,9 @@ async fn main(spawner: Spawner) {
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 
-    spawner.spawn(rtc_alarm(rtc_shared, i2c_bus, switch, crc)).unwrap();
+    spawner
+        .spawn(rtc_alarm(rtc_shared, i2c_bus, switch, crc))
+        .unwrap();
 
     /*
         STC3315 + Status LEDs
@@ -235,57 +310,88 @@ async fn main(spawner: Spawner) {
         USB initialization
     */
 
-    // Create the driver, from the HAL.
-    let driver = usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11);
+    Timer::after_secs(5).await;
 
-    // Create embassy-usb Config
-    let mut usb_config = embassy_usb::Config::new(0xc0de, 0xcafe);
-    //usb_config.device_class = 0xFF; // Vendor Specific
-    //usb_config.composite_with_iads = false;
-    usb_config.max_packet_size_0 = 64;
-    usb_config.manufacturer = Some("ShaOS");
-    usb_config.product = Some("Radon Station");
-    usb_config.max_power = 500;
+    // USB detect pin: PA10
+    let usb_detect_pin = ExtiInput::new(p.PA10, p.EXTI10, Pull::None);
+    if usb_detect_pin.is_low() {
+        switch_to_msi_2(&mut rcc.reborrow(), &mut pwm);
+    }
 
-    // Create embassy-usb DeviceBuilder using the driver and config.
-    // It needs some buffers for building the descriptors.
-    let mut config_descriptor = [0; 256];
-    let mut bos_descriptor = [0; 256];
-    let mut control_buf = [0; 64];
+    static USB_DETECT: StaticCell<ExtiInputShared> = StaticCell::new();
+    let usb_detect = USB_DETECT.init(Mutex::new(usb_detect_pin));
 
-    let mut state = cdc_acm::State::new();
+    loop {
+        usb_detect.lock().await.wait_for_high().await;
+        info!("USB detected");
+        switch_to_hsi_2(&mut rcc.reborrow(), &mut pwm);
 
-    let mut builder = embassy_usb::Builder::new(
-        driver,
-        usb_config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut [], // no msos descriptors
-        &mut control_buf,
-    );
+        Timer::after_secs(1).await;
 
-    // Create classes on the builder.
-    let mut class = cdc_acm::CdcAcmClass::new(&mut builder, &mut state, 64);
+        // Create the driver, from the HAL.
+        let driver = usb::Driver::new(p.USB.reborrow(), Irqs, p.PA12.reborrow(), p.PA11.reborrow());
 
-    // Build the builder.
-    let mut usb = builder.build();
+        // Create embassy-usb Config
+        let mut usb_config = embassy_usb::Config::new(0xc0de, 0xcafe);
+        //usb_config.device_class = 0xFF; // Vendor Specific
+        //usb_config.composite_with_iads = false;
+        usb_config.max_packet_size_0 = 64;
+        usb_config.manufacturer = Some("ShaOS");
+        usb_config.product = Some("Radon Station");
+        usb_config.max_power = 500;
 
-    // Run the USB device.
-    let usb_future = usb.run();
+        // Create embassy-usb DeviceBuilder using the driver and config.
+        // It needs some buffers for building the descriptors.
+        let mut config_descriptor = [0; 256];
+        let mut bos_descriptor = [0; 256];
+        let mut control_buf = [0; 64];
 
-    // Handling connections
-    let class_future = async {
-        loop {
-            class.wait_connection().await;
-            info!("Connected");
-            let _ = usb_connection::handle_usb_connection(&mut class, i2c_bus, rtc_shared, ssr_ctrl, &mut pwm).await;
-            info!("Disconnected");
-        }
-    };
+        let mut state = cdc_acm::State::new();
 
-    // Run everything concurrently.
-    join(usb_future, class_future).await;
+        let mut builder = embassy_usb::Builder::new(
+            driver,
+            usb_config,
+            &mut config_descriptor,
+            &mut bos_descriptor,
+            &mut [], // no msos descriptors
+            &mut control_buf,
+        );
 
+        // Create classes on the builder.
+        let mut class = cdc_acm::CdcAcmClass::new(&mut builder, &mut state, 64);
+
+        let class_future = async {
+            loop {
+                class.wait_connection().await;
+                info!("Class: Connected");
+                let _ = usb_connection::handle_usb_connection(
+                    &mut class, i2c_bus, rtc_shared, ssr_ctrl, &mut pwm,
+                )
+                .await;
+                info!("Class: Disconnected");
+            }
+        };
+
+        let usb_disconnection_detect = async {
+            usb_detect.lock().await.wait_for_low().await;
+        };
+
+        // initialize USB peripheral
+        let mut usb = builder.build();
+        let usb_future = usb.run();
+
+        // run them concurrently until usb_disconnection_detect exits
+        select3(usb_future, class_future, usb_disconnection_detect).await;
+
+        info!("USB disconnected");
+
+        // deactivate USB peripheral
+        usb.disable().await;
+
+        Timer::after_secs(1).await;
+
+        switch_to_msi_2(&mut rcc.reborrow(), &mut pwm);
+    }
     // Will never reach here
 }
 
@@ -348,7 +454,6 @@ async fn pulse_detection(mut pulse_in: ExtiInput<'static>) {
     }
 }
 
-
 #[embassy_executor::task]
 async fn user_button_fn(mut button: ExtiInput<'static>) {
     loop {
@@ -360,41 +465,61 @@ async fn user_button_fn(mut button: ExtiInput<'static>) {
     }
 }
 
-
 // RTC "alarm", uses pooling as proper alarms are not supported (?) yet
 // Set to trigger every min while testing. Final product should trigger every hour
 #[embassy_executor::task]
-async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: Input<'static>, mut crc: Crc<'static>) {
+async fn rtc_alarm(
+    rtc: &'static RtcShared,
+    i2c_bus: &'static I2c1Bus,
+    switch: Input<'static>,
+    mut crc: Crc<'static>,
+) {
     let mut old = rtc.lock().await.now().unwrap();
     let mut now;
     loop {
         now = rtc.lock().await.now().unwrap();
         if now.hour() != old.hour() {
-        //if now.minute() != old.minute() { // for debug purposes
+            //if now.minute() != old.minute() { // for debug purposes
             old = now;
             let pulse_counter = PULSE_COUNTER.load(Ordering::Relaxed);
             let pulse_counter_total = PULSE_COUNTER_TOTAL.load(Ordering::Relaxed);
             PULSE_COUNTER.store(0u16, Ordering::Relaxed);
             info!("Pulse counter: {} - {}", pulse_counter, pulse_counter_total);
 
-            if switch.is_high()
-            {
+            if switch.is_high() {
                 let mut i2c = i2c_bus.lock().await;
                 let soc = match stc3315::read_SOC(&mut i2c) {
-                    Ok(soc) => {info!("STC3315 - SoC: {}", soc); soc},
-                    Err(e) => {set_error_flag(I2C_ERROR); error!("STC3315 error: {}", e); 0u8},
+                    Ok(soc) => {
+                        info!("STC3315 - SoC: {}", soc);
+                        soc
+                    }
+                    Err(e) => {
+                        set_error_flag(I2C_ERROR);
+                        error!("STC3315 error: {}", e);
+                        0u8
+                    }
                 };
 
                 let t_rh = match sht40::read_raw(&mut i2c).await {
                     Ok(temp_and_rh) => {
-                        info!("SHT40: {}",temp_and_rh ); 
-                        [temp_and_rh[0], temp_and_rh[1], temp_and_rh[3], temp_and_rh[4]]}
-                    Err(e) => {set_error_flag(I2C_ERROR); error!("SHT40 error: {}", e); [0u8;4]},
+                        info!("SHT40: {}", temp_and_rh);
+                        [
+                            temp_and_rh[0],
+                            temp_and_rh[1],
+                            temp_and_rh[3],
+                            temp_and_rh[4],
+                        ]
+                    }
+                    Err(e) => {
+                        set_error_flag(I2C_ERROR);
+                        error!("SHT40 error: {}", e);
+                        [0u8; 4]
+                    }
                 };
 
                 /*
                     Data format:
-                        timestamp: year - month - day - hour - minute -> 5 bytes 
+                        timestamp: year - month - day - hour - minute -> 5 bytes
                         soc: 1 byte
                         temperature and rh: 6 bytes for the whole read, 4 bytes if we ignore the crc
                         pulse counter: 2 bytes, reset after each write
@@ -427,12 +552,16 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
                 };
 
                 // check boundaries
-                if address < RECORDS_START_ADDRESS || address + RECORDS_LENGTH > mc_24cs256::EEPROM_END_ADDRESS {
+                if address < RECORDS_START_ADDRESS
+                    || address + RECORDS_LENGTH > mc_24cs256::EEPROM_END_ADDRESS
+                {
                     address = RECORDS_START_ADDRESS;
                 }
 
                 // write next address
-                if let Err(e) = mc_24cs256::write_u16(&mut i2c, 0u16, address + RECORDS_LENGTH).await  {
+                if let Err(e) =
+                    mc_24cs256::write_u16(&mut i2c, 0u16, address + RECORDS_LENGTH).await
+                {
                     set_error_flag(I2C_ERROR);
                     error!("24CS256 address write error to 0x00: {}", e);
                     continue; // Don't proceed with the write operation
@@ -440,17 +569,26 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
 
                 let pulse_bytes = pulse_counter.to_be_bytes();
                 let data = [
-                        (old.year() -2000) as u8, old.month(), old.day(), old.hour(), old.minute(),
-                        soc,
-                        t_rh[0], t_rh[1], t_rh[2], t_rh[3],
-                        pulse_bytes[0], pulse_bytes[1]
-                    ];
+                    (old.year() - 2000) as u8,
+                    old.month(),
+                    old.day(),
+                    old.hour(),
+                    old.minute(),
+                    soc,
+                    t_rh[0],
+                    t_rh[1],
+                    t_rh[2],
+                    t_rh[3],
+                    pulse_bytes[0],
+                    pulse_bytes[1],
+                ];
 
                 crc.reset();
                 let crc_value = crc.feed_bytes(&data);
 
                 // write data
-                if let Err(e) = mc_24cs256::write_data_record(&mut i2c, address, data, crc_value ) .await  
+                if let Err(e) =
+                    mc_24cs256::write_data_record(&mut i2c, address, data, crc_value).await
                 {
                     set_error_flag(I2C_ERROR);
                     error!("24CS256 data write error to {}: {}", address, e);
@@ -463,4 +601,3 @@ async fn rtc_alarm(rtc: &'static RtcShared, i2c_bus: &'static I2c1Bus, switch: I
         Timer::after_secs(10).await;
     }
 }
-

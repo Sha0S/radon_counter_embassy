@@ -1,62 +1,99 @@
 #![allow(unused)]
 
 use defmt::{debug, info};
-use embassy_stm32::{i2c::{self, I2c, Master}, mode::Blocking};
+use embassy_stm32::{
+    i2c::{self, I2c, Master},
+    mode::Blocking,
+};
 
 const STC3115_ADDRESS: u8 = 0b111_0000;
 
 // Registers:
 const STC3115_REG_MODE: u8 = 0u8;
-const STC3115_REG_CTRL: u8 = 1u8;           // ALM_SOC, ALM_VOLT bits
-const STC3115_REG_SOC: u8 = 2u8;            // 2 bytes, 2-3
-const STC3115_REG_COUNTER: u8 = 4u8;        // 2 bytes, 4-5
-const STC3115_REG_CURRENT: u8 = 6u8;        // 2 bytes, 6-7
-const STC3115_REG_VOLTAGE: u8 = 8u8;        // 2 bytes, 8-9
-const STC3115_REG_OCV: u8 = 13u8;           // 2 bytes, 13-14
-const STC3115_REG_CC_CNF: u8 = 15u8;        // 2 bytes, 15-16
-const STC3115_REG_VM_CNF: u8 = 17u8;        // 2 bytes, 17-18
-const STC3115_REG_ALARM_SOC: u8 = 19u8;     // 1 bytes + REG_ALARM_VOLTAGE is the next reg
+const STC3115_REG_CTRL: u8 = 1u8; // ALM_SOC, ALM_VOLT bits
+const STC3115_REG_SOC: u8 = 2u8; // 2 bytes, 2-3
+const STC3115_REG_COUNTER: u8 = 4u8; // 2 bytes, 4-5
+const STC3115_REG_CURRENT: u8 = 6u8; // 2 bytes, 6-7
+const STC3115_REG_VOLTAGE: u8 = 8u8; // 2 bytes, 8-9
+const STC3115_REG_OCV: u8 = 13u8; // 2 bytes, 13-14
+const STC3115_REG_CC_CNF: u8 = 15u8; // 2 bytes, 15-16
+const STC3115_REG_VM_CNF: u8 = 17u8; // 2 bytes, 17-18
+const STC3115_REG_ALARM_SOC: u8 = 19u8; // 1 bytes + REG_ALARM_VOLTAGE is the next reg
 const STC3115_REG_CURRENT_THRES: u8 = 21u8; // 1 bytes
-const STC3115_REG_RELAX_MAX: u8 = 23u8;     // 1 bytes
-const STC3115_REG_RAM_0: u8 = 32u8;         // 15 bytes, 32-47
-const STC3115_REG_OCVTAB: u8 = 48u8;        // 16 bytes, 48-63
+const STC3115_REG_RELAX_MAX: u8 = 23u8; // 1 bytes
+const STC3115_REG_RAM_0: u8 = 32u8; // 15 bytes, 32-47
+const STC3115_REG_OCVTAB: u8 = 48u8; // 16 bytes, 48-63
 
-fn clear_STC3115_RAM(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error> {
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_RAM_0,        0b0000_0000, 0b0000_0000, 0b0000_0000 ])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_RAM_0+ 3u8,   0b0000_0000, 0b0000_0000, 0b0000_0000 ])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_RAM_0+ 6u8,   0b0000_0000, 0b0000_0000, 0b0000_0000 ])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_RAM_0+ 9u8,   0b0000_0000, 0b0000_0000, 0b0000_0000 ])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_RAM_0+ 12u8,  0b0000_0000, 0b0000_0000, 0b0000_0000 ])?;
+fn clear_STC3115_RAM(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(), i2c::Error> {
+    i2c.blocking_write(
+        STC3115_ADDRESS,
+        &[STC3115_REG_RAM_0, 0b0000_0000, 0b0000_0000, 0b0000_0000],
+    )?;
+    i2c.blocking_write(
+        STC3115_ADDRESS,
+        &[
+            STC3115_REG_RAM_0 + 3u8,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ],
+    )?;
+    i2c.blocking_write(
+        STC3115_ADDRESS,
+        &[
+            STC3115_REG_RAM_0 + 6u8,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ],
+    )?;
+    i2c.blocking_write(
+        STC3115_ADDRESS,
+        &[
+            STC3115_REG_RAM_0 + 9u8,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ],
+    )?;
+    i2c.blocking_write(
+        STC3115_ADDRESS,
+        &[
+            STC3115_REG_RAM_0 + 12u8,
+            0b0000_0000,
+            0b0000_0000,
+            0b0000_0000,
+        ],
+    )?;
 
     Ok(())
 }
 
-fn read_STC3115_RAM(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error> {
-    let mut buf = [0u8,0u8,0u8];
+fn read_STC3115_RAM(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(), i2c::Error> {
+    let mut buf = [0u8, 0u8, 0u8];
     i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0], &mut buf)?;
     info!("RAM reg 0: {:?}", buf);
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0+3u8], &mut buf)?;
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0 + 3u8], &mut buf)?;
     info!("RAM reg 1: {:?}", buf);
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0+6u8], &mut buf)?;
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0 + 6u8], &mut buf)?;
     info!("RAM reg 2: {:?}", buf);
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0+9u8], &mut buf)?;
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0 + 9u8], &mut buf)?;
     info!("RAM reg 3: {:?}", buf);
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0+12u8], &mut buf)?;
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_RAM_0 + 12u8], &mut buf)?;
     info!("RAM reg 4: {:?}", buf);
-
 
     Ok(())
 }
 
-pub fn init(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
+pub fn init(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(), i2c::Error> {
     // Reset RAM, write 0x00 at registers 0x20 to 0x2F (32-47, 15 regs)
     clear_STC3115_RAM(i2c)?;
 
     /* See: Appliction note - AN4324, model: STC3115AIQT */
     /*1. Read the OCV register. The first OCV measurement reflects the initial battery state of
     charge (SOC). Read it and save it into a temporary variable. */
-    let mut ocv_raw = [0u8,0u8];
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_OCV], &mut ocv_raw )?;
+    let mut ocv_raw = [0u8, 0u8];
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_OCV], &mut ocv_raw)?;
 
     /* 2. Set the STC3115 parameters (ensuring first that the GG_RUN bit is set to 0). The
     REG_OCVTAB registers have to be filled with their previously calculated values as
@@ -74,11 +111,11 @@ pub fn init(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
     i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_MODE, 0b000_0111])?;
 
     // 2.b) for REG_OCVTAB the default values (all 0) are reasonable for this application
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB,       0u8,0u8,0u8])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 3u8, 0u8,0u8,0u8])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 6u8, 0u8,0u8,0u8])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 9u8, 0u8,0u8,0u8])?;
-    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 12u8, 0u8,0u8,0u8])?;
+    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB, 0u8, 0u8, 0u8])?;
+    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 3u8, 0u8, 0u8, 0u8])?;
+    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 6u8, 0u8, 0u8, 0u8])?;
+    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 9u8, 0u8, 0u8, 0u8])?;
+    i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 12u8, 0u8, 0u8, 0u8])?;
     i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_OCVTAB + 15u8, 0u8])?;
 
     // 2.c) for REG_CC_CNF the default value assumes 10mOhm current sense resistor, and a 1957 mAh battery.
@@ -110,7 +147,7 @@ pub fn init(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
     Ok(())
 }
 
-pub fn start(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
+pub fn start(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(), i2c::Error> {
     i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_MODE, 0b001_0000])?;
     //i2c.blocking_write(STC3115_ADDRESS, &[STC3115_REG_CTRL, 0b000_0001])?;
 
@@ -118,9 +155,9 @@ pub fn start(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
     Ok(())
 }
 
-fn read_STC3115_settings(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::Error>  {
-    let mut buf = [0u8,0u8];
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_MODE], &mut buf )?;
+fn read_STC3115_settings(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(), i2c::Error> {
+    let mut buf = [0u8, 0u8];
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_MODE], &mut buf)?;
     info!("STC3115 MODE & CTRL: {:b}", buf);
 
     //i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_COUNTER], &mut buf )?;
@@ -135,9 +172,9 @@ fn read_STC3115_settings(i2c: &mut I2c<'_, Blocking, Master>) -> Result<(),i2c::
     Ok(())
 }
 
-pub fn read_SOC(i2c: &mut I2c<'_, Blocking, Master>) -> Result<u8,i2c::Error> {
+pub fn read_SOC(i2c: &mut I2c<'_, Blocking, Master>) -> Result<u8, i2c::Error> {
     let mut buf = [0u8, 0u8];
-    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_SOC], &mut buf )?;
+    i2c.blocking_write_read(STC3115_ADDRESS, &[STC3115_REG_SOC], &mut buf)?;
 
     debug!("SoC raw result: {:?}", buf);
 
@@ -145,5 +182,5 @@ pub fn read_SOC(i2c: &mut I2c<'_, Blocking, Master>) -> Result<u8,i2c::Error> {
     // it should be (MSB*256+LSB)/512
     // but the LSB is only 0.5% max, the reading being 1-2% of is acceptable
     // in this application
-    Ok(buf[1]/2)
+    Ok(buf[1] / 2)
 }

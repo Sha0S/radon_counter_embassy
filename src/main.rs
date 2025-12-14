@@ -4,13 +4,16 @@
 
 /*
     ToDo:
-        - SD card
-        - SSR control (PB2)
+        - Use the RTC for timestamp while writing to the SD card
+        - Implementing timeouts for the EEPROM operaions
         - LEDs: use them to display error codes?
+        - SHT40 CRC check
 */
 
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
+use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice;
 use embassy_executor::Spawner;
 use embassy_futures::select::select3;
 use embassy_stm32::crc::Crc;
@@ -20,14 +23,17 @@ use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
 use embassy_stm32::peripherals::TIM2;
 use embassy_stm32::rtc::{Rtc, RtcConfig};
+use embassy_stm32::spi::Spi;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm, SimplePwmChannel};
 use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
+use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm;
 
+use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use static_cell::StaticCell;
 
 use defmt::*;
@@ -44,6 +50,8 @@ type RtcShared = Mutex<NoopRawMutex, Rtc>;
 type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 type ExtiInputShared<'a> = Mutex<NoopRawMutex, ExtiInput<'a>>;
 
+static SPI_BUS: StaticCell<NoopMutex<RefCell<Spi<Blocking>>>> = StaticCell::new();
+
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static PULSE_COUNTER_TOTAL: AtomicU16 = AtomicU16::new(0u16);
 static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
@@ -51,7 +59,7 @@ static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
 // Tracking errors during runtime
 const I2C_ERROR: u8 = 0u8;
-//const SPI_ERROR: u8 = 1u8;
+const SD_ERROR: u8 = 1u8;
 const USB_ERROR: u8 = 2u8;
 const RTC_ERROR: u8 = 3u8;
 const HV_PSU_ERROR: u8 = 4u8;
@@ -84,7 +92,7 @@ fn switch_to_hsi_2<'a>(
     info!("switch_to_hsi_2");
 
     // TODO: dirty hack, would have to reconfigure the whole TIM2 between the two(three?) modes.
-    pwm.set_duty_cycle_fully_off();
+    pwm.set_duty_cycle_percent(50);
 
     // leave low power mode
     PWR.cr1().write(|f| f.set_lpr(false));
@@ -121,7 +129,7 @@ fn switch_to_msi_2<'a>(
 
     // reinit will not disable HSI?
     // at least the Vcore current consumption will not drop back to the "normal" levels,
-    // unless I manually disable it. Additionally, disabling it after reinit causes to
+    // unless I manually disable it. Additionally, disabling it after reinit causes the
     // power consumption to drop sharply (to ~30uA), and the unit becomes unresponsive,
     // or at least the delays caused by the Timer fns will become much larger than intended.
     RCC.cfgr().write(|f| f.set_sw(Sysclk::MSI)); // manually switch MUX back to MSI
@@ -134,7 +142,7 @@ fn switch_to_msi_2<'a>(
         embassy_stm32::rcc::Config {
             hsi: false,
             ls: LsConfig::default_lse(),
-            msi: Some(MSIRange::RANGE1M),
+            msi: Some(MSIRange::RANGE2M),
             sys: Sysclk::MSI,
             hsi48: None,
             ..Default::default()
@@ -159,11 +167,14 @@ async fn main(spawner: Spawner) {
     let mut system_config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
-        system_config.rcc.hsi = false;
+        system_config.rcc.hsi = true;
         system_config.rcc.ls = LsConfig::default_lse();
         system_config.rcc.msi = Some(MSIRange::RANGE2M);
-        system_config.rcc.sys = Sysclk::MSI;
-        system_config.rcc.hsi48 = None;
+        system_config.rcc.sys = Sysclk::HSI;
+        system_config.rcc.hsi48 = Some(Hsi48Config {
+            sync_from_usb: true,
+        });
+        system_config.rcc.mux.clk48sel = mux::Clk48sel::HSI48;
     }
 
     let mut p = embassy_stm32::init(system_config);
@@ -201,7 +212,7 @@ async fn main(spawner: Spawner) {
         None,
         None,
         Some(tim2_ch4),
-        khz(20),
+        khz(10),
         Default::default(),
     );
     let mut pwm = pwm_controller.ch4();
@@ -256,6 +267,28 @@ async fn main(spawner: Spawner) {
     });
 
     /*
+        SD card
+        The embedded-sdmmc library excepts a embeded_hal SPI device,
+        we use the embassy-embedded-hal library to convert the Embassy SPI device to it.
+    */
+
+    let mut spi_config = embassy_stm32::spi::Config::default();
+    spi_config.frequency = embassy_stm32::time::Hertz(400_000);
+
+    let spi = embassy_stm32::spi::Spi::new_blocking(p.SPI2, p.PB13, p.PB15, p.PB14, spi_config);
+    let spi_bus = NoopMutex::new(RefCell::new(spi));
+    let spi_bus = SPI_BUS.init(spi_bus);
+
+    let cs_pin1 = Output::new(p.PA8, Level::Low, Speed::Medium);
+    let spi_dev1 = SpiDevice::new(spi_bus, cs_pin1);
+
+    let sd_card = SdCard::new(spi_dev1, embassy_time::Delay);
+
+    /* SD card detection, and power control */
+    let sd_card_detect = Input::new(p.PB12, Pull::None);
+    let sd_card_power = Output::new(p.PA9, Level::Low, Speed::Medium);
+
+    /*
         RTC
     */
 
@@ -266,7 +299,15 @@ async fn main(spawner: Spawner) {
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 
     spawner
-        .spawn(rtc_alarm(rtc_shared, i2c_bus, switch, crc))
+        .spawn(rtc_alarm(
+            rtc_shared,
+            i2c_bus,
+            switch,
+            crc,
+            sd_card,
+            sd_card_detect,
+            sd_card_power,
+        ))
         .unwrap();
 
     /*
@@ -310,7 +351,7 @@ async fn main(spawner: Spawner) {
         USB initialization
     */
 
-    Timer::after_secs(5).await;
+    //Timer::after_secs(5).await;
 
     // USB detect pin: PA10
     let usb_detect_pin = ExtiInput::new(p.PA10, p.EXTI10, Pull::None);
@@ -473,6 +514,12 @@ async fn rtc_alarm(
     i2c_bus: &'static I2c1Bus,
     switch: Input<'static>,
     mut crc: Crc<'static>,
+    mut sd_card: SdCard<
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        embassy_time::Delay,
+    >,
+    sd_card_detect: Input<'static>,
+    mut sd_card_power: Output<'static>,
 ) {
     let mut old = rtc.lock().await.now().unwrap();
     let mut now;
@@ -595,9 +642,85 @@ async fn rtc_alarm(
                     continue;
                 }
 
-                info!("Write data: success! Address: {}", address)
+                info!("Write data: success! Address: {}", address);
+
+                /*
+                    Writing to SD card if it is present.
+                    Pulls sd_card_detect pin low.
+                */
+                if sd_card_detect.is_low() {
+                    (sd_card, sd_card_power) = write_to_sd(&data, sd_card, sd_card_power).await;
+                }
             }
         }
         Timer::after_secs(10).await;
+    }
+}
+
+async fn write_to_sd(
+    data: &[u8],
+    mut sd_card: SdCard<
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        embassy_time::Delay,
+    >,
+    mut sd_card_power: Output<'static>,
+) -> (
+    SdCard<
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        embassy_time::Delay,
+    >,
+    Output<'static>,
+) {
+    sd_card_power.set_high(); // Enable power to the SD card
+    Timer::after_millis(100).await;
+
+    if sd_card.num_bytes().is_err() {
+        error!("SD card initialization failed!");
+        set_error_flag(SD_ERROR);
+    } // card size is not important, but this fn will trigger a re-initialization
+
+    // Trying to mount the device
+    let volume_mgr = VolumeManager::new(sd_card, DummyTimesource::default());
+    if let Ok(volume0) = volume_mgr.open_volume(VolumeIdx(0))
+        && let Ok(root_dir) = volume0.open_root_dir()
+    {
+        // Open file to append next dataset
+        if let Ok(my_file) =
+            root_dir.open_file_in_dir("RESULTS.DAT", embedded_sdmmc::Mode::ReadWriteCreateOrAppend)
+        {
+            // Write to the opened file
+            if my_file.write(data).is_err() {
+                error!("Wirite to SD card failed!");
+                set_error_flag(SD_ERROR);
+            }
+        } else {
+            error!("Opening file failed!");
+            set_error_flag(SD_ERROR);
+        }
+    } else {
+        error!("Mounting volume failed!");
+        set_error_flag(SD_ERROR);
+    }
+
+    (sd_card, _) = volume_mgr.free(); // return the sd_card device, so can use it the next loop
+    sd_card_power.set_low(); // Disable power to the SD card
+
+    (sd_card, sd_card_power)
+}
+
+#[derive(Default)]
+pub struct DummyTimesource();
+
+// ToDo: USE the RTC for timestamp
+impl embedded_sdmmc::TimeSource for DummyTimesource {
+    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
+        embedded_sdmmc::Timestamp {
+            year_since_1970: 0,
+            zero_indexed_month: 0,
+            zero_indexed_day: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+        }
     }
 }

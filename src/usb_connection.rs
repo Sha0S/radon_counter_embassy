@@ -2,7 +2,7 @@ use core::sync::atomic::Ordering;
 use defmt::{error, info};
 use embassy_stm32::{
     peripherals::TIM2,
-    rtc::{DateTime, DayOfWeek},
+    rtc::{DateTime, DayOfWeek, RtcTimeProvider},
     timer::simple_pwm::SimplePwmChannel,
     usb,
 };
@@ -59,6 +59,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
     class: &mut cdc_acm::CdcAcmClass<'d, usb::Driver<'d, T>>,
     i2c_bus: &'static I2c1Bus,
     rtc: &'static RtcShared,
+    rtc_time: RtcTimeProvider,
     ssr: &'static OutputShared<'static>,
     pwm: &mut SimplePwmChannel<'_, TIM2>,
 ) -> Result<(), Disconnected> {
@@ -132,7 +133,7 @@ pub async fn handle_usb_connection<'d, T: usb::Instance + 'd>(
                 }
             }
             USB_COMMAND_GET_RTC => {
-                if let Ok(now) = rtc.lock().await.now() {
+                if let Ok(now) = rtc_time.now() {
                     class
                         .write_packet(&[
                             USB_RESPONSE_OK,

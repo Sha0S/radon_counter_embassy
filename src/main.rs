@@ -17,16 +17,17 @@ use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice;
 use embassy_executor::Spawner;
 use embassy_futures::select::select3;
 use embassy_stm32::crc::Crc;
-use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::exti::{self, ExtiInput};
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
 use embassy_stm32::peripherals::TIM2;
-use embassy_stm32::rtc::{Rtc, RtcConfig};
+use embassy_stm32::rtc::{Rtc, RtcConfig, RtcTimeProvider};
 use embassy_stm32::spi::Spi;
+use embassy_stm32::spi::mode::Master;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm, SimplePwmChannel};
-use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
+use embassy_stm32::{Peri, bind_interrupts, interrupt, peripherals, usb};
 use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -50,11 +51,11 @@ type RtcShared = Mutex<NoopRawMutex, Rtc>;
 type OutputShared<'a> = Mutex<NoopRawMutex, Output<'a>>;
 type ExtiInputShared<'a> = Mutex<NoopRawMutex, ExtiInput<'a>>;
 
-static SPI_BUS: StaticCell<NoopMutex<RefCell<Spi<Blocking>>>> = StaticCell::new();
+static SPI_BUS: StaticCell<NoopMutex<RefCell<Spi<Blocking, Master>>>> = StaticCell::new();
 
 static PULSE_COUNTER: AtomicU16 = AtomicU16::new(0u16);
 static PULSE_COUNTER_TOTAL: AtomicU16 = AtomicU16::new(0u16);
-static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(true);
+static HV_PSU_ENABLE: AtomicBool = AtomicBool::new(false);
 static USER_BUTTON: AtomicBool = AtomicBool::new(false);
 
 // Tracking errors during runtime
@@ -80,6 +81,8 @@ fn set_error_flag(error: u8) {
 
 bind_interrupts!(struct Irqs {
     USB_DRD_FS => usb::InterruptHandler<peripherals::USB>;
+    EXTI4_15 => exti::InterruptHandler<interrupt::typelevel::EXTI4_15>;
+    EXTI2_3 => exti::InterruptHandler<interrupt::typelevel::EXTI2_3>;
 });
 
 /// Leave low power run mode, switch to HSI for the clock source + turn on HSI48 for USB
@@ -126,17 +129,6 @@ fn switch_to_msi_2<'a>(
 
     // TODO: dirty hack, would have to reconfigure the whole TIM2 between the two(three?) modes.
     pwm.set_duty_cycle_percent(30);
-
-    // reinit will not disable HSI?
-    // at least the Vcore current consumption will not drop back to the "normal" levels,
-    // unless I manually disable it. Additionally, disabling it after reinit causes the
-    // power consumption to drop sharply (to ~30uA), and the unit becomes unresponsive,
-    // or at least the delays caused by the Timer fns will become much larger than intended.
-    RCC.cfgr().write(|f| f.set_sw(Sysclk::MSI)); // manually switch MUX back to MSI
-    RCC.cr().write(|f| f.set_hsion(false)); // manually disable HSI
-
-    // reinit will NOT disable HSI48, if it was enabled before.
-    RCC.crrcr().write(|f| f.set_hsi48on(false)); // manually disable HSI48
 
     reinit(
         embassy_stm32::rcc::Config {
@@ -225,9 +217,8 @@ async fn main(spawner: Spawner) {
     /*
         pulse_in (PC13) --> pulse_counter
     */
-
-    let pulse_in = ExtiInput::new(p.PC13, p.EXTI13, Pull::None);
-    spawner.spawn(pulse_detection(pulse_in)).unwrap();
+    let pulse_in = ExtiInput::new(p.PC13, p.EXTI13, Pull::None, Irqs);
+    spawner.spawn(pulse_detection(pulse_in).unwrap());
 
     /*
         SSR control (PB2)
@@ -241,8 +232,8 @@ async fn main(spawner: Spawner) {
         User button (PB3)
     */
 
-    let user_button = ExtiInput::new(p.PB3, p.EXTI3, Pull::Up);
-    spawner.spawn(user_button_fn(user_button)).unwrap();
+    let user_button = ExtiInput::new(p.PB3, p.EXTI3, Pull::Up, Irqs);
+    spawner.spawn(user_button_fn(user_button).unwrap());
 
     /*
         Switch (PA15)
@@ -273,7 +264,7 @@ async fn main(spawner: Spawner) {
     */
 
     let mut spi_config = embassy_stm32::spi::Config::default();
-    spi_config.frequency = embassy_stm32::time::Hertz(400_000);
+    spi_config.frequency = embassy_stm32::time::Hertz(100_000);
 
     let spi = embassy_stm32::spi::Spi::new_blocking(p.SPI2, p.PB13, p.PB15, p.PB14, spi_config);
     let spi_bus = NoopMutex::new(RefCell::new(spi));
@@ -292,23 +283,21 @@ async fn main(spawner: Spawner) {
         RTC
     */
 
-    let rtc = Rtc::new(p.RTC, RtcConfig::default());
-    //let default_dt = DateTime::from(2025, 10, 25, DayOfWeek::Saturday, 12, 40, 00, 00).unwrap();
-    //rtc.set_datetime(default_dt).unwrap();
+    let (rtc, rtc_time) = Rtc::new(p.RTC, RtcConfig::default());
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
     let rtc_shared = RTC_SHARED.init(Mutex::new(rtc));
 
     spawner
         .spawn(rtc_alarm(
-            rtc_shared,
+            rtc_time.clone(),
             i2c_bus,
             switch,
             crc,
             sd_card,
             sd_card_detect,
             sd_card_power,
-        ))
-        .unwrap();
+        )
+        .unwrap());
 
     /*
         STC3315 + Status LEDs
@@ -344,8 +333,7 @@ async fn main(spawner: Spawner) {
     // Is pulled LOW while charging the battery
     let charging_detection = Input::new(p.PB4, Pull::None);
     spawner
-        .spawn(status_LED_control(status_LEDs, charging_detection, i2c_bus))
-        .unwrap();
+        .spawn(status_LED_control(status_LEDs, charging_detection, i2c_bus).unwrap());
 
     /*
         USB initialization
@@ -354,7 +342,7 @@ async fn main(spawner: Spawner) {
     //Timer::after_secs(5).await;
 
     // USB detect pin: PA10
-    let usb_detect_pin = ExtiInput::new(p.PA10, p.EXTI10, Pull::None);
+    let usb_detect_pin = ExtiInput::new(p.PA10, p.EXTI10, Pull::None, Irqs);
     if usb_detect_pin.is_low() {
         switch_to_msi_2(&mut rcc.reborrow(), &mut pwm);
     }
@@ -406,7 +394,7 @@ async fn main(spawner: Spawner) {
                 class.wait_connection().await;
                 info!("Class: Connected");
                 let _ = usb_connection::handle_usb_connection(
-                    &mut class, i2c_bus, rtc_shared, ssr_ctrl, &mut pwm,
+                    &mut class, i2c_bus, rtc_shared, rtc_time.clone(), ssr_ctrl, &mut pwm,
                 )
                 .await;
                 info!("Class: Disconnected");
@@ -510,21 +498,21 @@ async fn user_button_fn(mut button: ExtiInput<'static>) {
 // Set to trigger every min while testing. Final product should trigger every hour
 #[embassy_executor::task]
 async fn rtc_alarm(
-    rtc: &'static RtcShared,
+    rtc: RtcTimeProvider,
     i2c_bus: &'static I2c1Bus,
     switch: Input<'static>,
     mut crc: Crc<'static>,
     mut sd_card: SdCard<
-        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking, Master>, Output<'static>>,
         embassy_time::Delay,
     >,
     sd_card_detect: Input<'static>,
     mut sd_card_power: Output<'static>,
 ) {
-    let mut old = rtc.lock().await.now().unwrap();
+    let mut old = rtc.now().unwrap();
     let mut now;
     loop {
-        now = rtc.lock().await.now().unwrap();
+        now = rtc.now().unwrap();
         if now.hour() != old.hour() {
             //if now.minute() != old.minute() { // for debug purposes
             old = now;
@@ -660,13 +648,13 @@ async fn rtc_alarm(
 async fn write_to_sd(
     data: &[u8],
     mut sd_card: SdCard<
-        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking, Master>, Output<'static>>,
         embassy_time::Delay,
     >,
     mut sd_card_power: Output<'static>,
 ) -> (
     SdCard<
-        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking>, Output<'static>>,
+        SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking, Master>, Output<'static>>,
         embassy_time::Delay,
     >,
     Output<'static>,

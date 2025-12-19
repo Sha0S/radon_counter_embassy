@@ -21,12 +21,13 @@ use embassy_stm32::exti::{self, ExtiInput};
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
-use embassy_stm32::peripherals::TIM2;
+use embassy_stm32::peripherals::{IWDG, TIM2};
 use embassy_stm32::rtc::{Rtc, RtcConfig, RtcTimeProvider};
 use embassy_stm32::spi::Spi;
 use embassy_stm32::spi::mode::Master;
 use embassy_stm32::time::khz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm, SimplePwmChannel};
+use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{Peri, bind_interrupts, interrupt, peripherals, usb};
 use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -170,6 +171,10 @@ async fn main(spawner: Spawner) {
     }
 
     let mut p = embassy_stm32::init(system_config);
+
+    /* Watchdog */
+    spawner.spawn(watchdog(p.IWDG).unwrap());
+
     let mut rcc = p.RCC;
 
     // enabling the charging of the super-cap connected to V_BAT
@@ -710,5 +715,15 @@ impl embedded_sdmmc::TimeSource for DummyTimesource {
             minutes: 0,
             seconds: 0,
         }
+    }
+}
+
+#[embassy_executor::task]
+async fn watchdog(p: Peri<'static, IWDG>) {
+    let mut watchdog = IndependentWatchdog::new(p, 10_000_000);
+    watchdog.unleash();
+    loop {
+        Timer::after_secs(5).await;
+        watchdog.pet();
     }
 }

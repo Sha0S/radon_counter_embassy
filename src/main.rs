@@ -99,8 +99,8 @@ fn switch_to_hsi_2<'a>(
     pwm.set_duty_cycle_percent(50);
 
     // leave low power mode
-    PWR.cr1().write(|f| f.set_lpr(false));
-    while PWR.sr2().read().reglpf() {}
+    PWR.cr1().modify(|f| f.set_lpr(false));
+    while !PWR.sr2().read().reglpf() {}
 
     let mut rcc_config = Config::default();
     {
@@ -144,7 +144,7 @@ fn switch_to_msi_2<'a>(
     );
 
     // enter low power mode
-    PWR.cr1().write(|f| f.set_lpr(true));
+    PWR.cr1().modify(|f| f.set_lpr(true));
 
     info!("switch_to_msi_2 - done");
 }
@@ -178,8 +178,8 @@ async fn main(spawner: Spawner) {
     let mut rcc = p.RCC;
 
     // enabling the charging of the super-cap connected to V_BAT
-    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbrs(false)); // charge V_BAT  through a 5 kOhms resistor
-    embassy_stm32::pac::PWR.cr4().write(|f| f.set_vbe(true)); // battery charging enable 
+    embassy_stm32::pac::PWR.cr4().modify(|f| f.set_vbrs(false)); // charge V_BAT  through a 5 kOhms resistor
+    embassy_stm32::pac::PWR.cr4().modify(|f| f.set_vbe(true)); // battery charging enable 
 
     // Shared I2C bus for tasks
     // Default is 100kHz, medium speed GPIO, no internal pull-ups
@@ -286,7 +286,7 @@ async fn main(spawner: Spawner) {
 
     /*
         RTC
-    */
+    */  
 
     let (rtc, rtc_time) = Rtc::new(p.RTC, RtcConfig::default());
     static RTC_SHARED: StaticCell<RtcShared> = StaticCell::new();
@@ -642,7 +642,7 @@ async fn rtc_alarm(
                     Pulls sd_card_detect pin low.
                 */
                 if sd_card_detect.is_low() {
-                    (sd_card, sd_card_power) = write_to_sd(&data, sd_card, sd_card_power).await;
+                    (sd_card, sd_card_power) = write_to_sd("RES.DAT", &data, sd_card, sd_card_power).await;
                 }
             }
         }
@@ -651,6 +651,7 @@ async fn rtc_alarm(
 }
 
 async fn write_to_sd(
+    file: &str,
     data: &[u8],
     mut sd_card: SdCard<
         SpiDevice<'static, NoopRawMutex, Spi<'static, Blocking, Master>, Output<'static>>,
@@ -679,7 +680,7 @@ async fn write_to_sd(
     {
         // Open file to append next dataset
         if let Ok(my_file) =
-            root_dir.open_file_in_dir("RESULTS.DAT", embedded_sdmmc::Mode::ReadWriteCreateOrAppend)
+            root_dir.open_file_in_dir(file, embedded_sdmmc::Mode::ReadWriteCreateOrAppend)
         {
             // Write to the opened file
             if my_file.write(data).is_err() {
